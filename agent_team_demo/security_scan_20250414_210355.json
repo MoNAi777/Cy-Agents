@@ -1,0 +1,13 @@
+{
+  "target_url": "https://studio.firebase.google.com/studio-66184634",
+  "scan_time": "2025-04-14 21:03:56",
+  "server_info": {
+    "server": "ESF"
+  },
+  "stats": {
+    "urls_scanned": 1,
+    "forms_analyzed": 0,
+    "total_vulnerabilities": 0
+  },
+  "vulnerabilities": []
+}

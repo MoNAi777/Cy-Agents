@@ -1,0 +1,54 @@
+{
+  "target_url": "https://app.base44.com/apps/67f61978ca7c3644b1004c5e/editor/preview/Home",
+  "scan_time": "2025-04-14 20:41:15",
+  "server_info": {
+    "server": "cloudflare"
+  },
+  "stats": {
+    "urls_scanned": 1,
+    "forms_analyzed": 0,
+    "total_vulnerabilities": 5
+  },
+  "vulnerabilities": [
+    {
+      "name": "Missing Strict-Transport-Security Header",
+      "description": "The Strict-Transport-Security header is missing, which may lead to security issues.",
+      "severity": "Medium",
+      "url": "https://app.base44.com/apps/67f61978ca7c3644b1004c5e/editor/preview/Home",
+      "evidence": "Missing Strict-Transport-Security header",
+      "remediation": "Add the Strict-Transport-Security header with a suitable max-age directive."
+    },
+    {
+      "name": "Missing Content-Security-Policy Header",
+      "description": "The Content-Security-Policy header is missing, which may lead to security issues.",
+      "severity": "Medium",
+      "url": "https://app.base44.com/apps/67f61978ca7c3644b1004c5e/editor/preview/Home",
+      "evidence": "Missing Content-Security-Policy header",
+      "remediation": "Implement a Content Security Policy to prevent XSS attacks."
+    },
+    {
+      "name": "Missing X-Content-Type-Options Header",
+      "description": "The X-Content-Type-Options header is missing, which may lead to security issues.",
+      "severity": "Medium",
+      "url": "https://app.base44.com/apps/67f61978ca7c3644b1004c5e/editor/preview/Home",
+      "evidence": "Missing X-Content-Type-Options header",
+      "remediation": "Add the X-Content-Type-Options header with the nosniff directive."
+    },
+    {
+      "name": "Missing X-Frame-Options Header",
+      "description": "The X-Frame-Options header is missing, which may lead to security issues.",
+      "severity": "Medium",
+      "url": "https://app.base44.com/apps/67f61978ca7c3644b1004c5e/editor/preview/Home",
+      "evidence": "Missing X-Frame-Options header",
+      "remediation": "Add the X-Frame-Options header with DENY or SAMEORIGIN value."
+    },
+    {
+      "name": "Missing X-XSS-Protection Header",
+      "description": "The X-XSS-Protection header is missing, which may lead to security issues.",
+      "severity": "Medium",
+      "url": "https://app.base44.com/apps/67f61978ca7c3644b1004c5e/editor/preview/Home",
+      "evidence": "Missing X-XSS-Protection header",
+      "remediation": "Add the X-XSS-Protection header with mode=block directive."
+    }
+  ]
+}

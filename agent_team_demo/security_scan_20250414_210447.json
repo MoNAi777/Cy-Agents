@@ -1,0 +1,30 @@
+{
+  "target_url": "https://docs.agno.com/tools/functions",
+  "scan_time": "2025-04-14 21:04:48",
+  "server_info": {
+    "server": "Vercel"
+  },
+  "stats": {
+    "urls_scanned": 1,
+    "forms_analyzed": 0,
+    "total_vulnerabilities": 2
+  },
+  "vulnerabilities": [
+    {
+      "name": "Missing X-Content-Type-Options Header",
+      "description": "The X-Content-Type-Options header is missing, which may lead to security issues.",
+      "severity": "Medium",
+      "url": "https://docs.agno.com/tools/functions",
+      "evidence": "Missing X-Content-Type-Options header",
+      "remediation": "Add the X-Content-Type-Options header with the nosniff directive."
+    },
+    {
+      "name": "Missing X-XSS-Protection Header",
+      "description": "The X-XSS-Protection header is missing, which may lead to security issues.",
+      "severity": "Medium",
+      "url": "https://docs.agno.com/tools/functions",
+      "evidence": "Missing X-XSS-Protection header",
+      "remediation": "Add the X-XSS-Protection header with mode=block directive."
+    }
+  ]
+}
