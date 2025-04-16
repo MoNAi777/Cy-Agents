@@ -26,14 +26,7 @@ import concurrent.futures
 from bs4 import BeautifulSoup
 import pandas as pd
 
-# Import the report tab module
-try:
-    from report_tab import render_report_tab
-    report_module_available = True
-except ImportError:
-    report_module_available = False
-    print("Report tab module not found, using built-in report tab")
-
+# --- Load .env file FIRST --- 
 # Load environment variables from .env file
 env_path = Path(__file__).parent / '.env'
 if env_path.exists():
@@ -42,6 +35,21 @@ if env_path.exists():
     print(f"Loaded environment from {env_path}")
 else:
     print(f"No .env file found at {env_path}, using system environment variables")
+
+# --- Now import local modules --- 
+from bug_bounty_team import (
+    shared_context, run_poc_code, 
+    execute_recon_phase, execute_vuln_scan_phase, 
+    execute_exploit_phase, execute_report_phase
+)
+
+# Import the report tab module
+try:
+    from report_tab import render_report_tab
+    report_module_available = True
+except ImportError:
+    report_module_available = False
+    print("Report tab module not found, using built-in report tab")
 
 # Set OpenAI API key from environment if available
 if os.getenv("OPENAI_API_KEY"):
@@ -325,7 +333,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Create tabs for different scan features with improved styling
+# Create tabs for the main dashboard sections (excluding the AI Bug Bounty Team)
 tabs = st.tabs(["🔍 Security Scanner", "📊 Scan Results", "📝 Security Report", "🤖 AI Agent", "⚙️ Advanced Tools"])
 
 # Add Python tool decorator for custom agent tools
@@ -1714,6 +1722,163 @@ with tabs[4]:
                 
                 vuln_df = pd.DataFrame(vuln_data)
                 st.dataframe(vuln_df, use_container_width=True)
+
+# --- Sidebar Navigation --- 
+# Define navigation options including the Bug Bounty Team
+SIDEBAR_TABS = [
+    "🔍 Security Scanner", # Represents the main dashboard tabs
+    "🦾 AI Bug Bounty Team" 
+]
+
+st.sidebar.markdown("---") # Add a separator
+st.sidebar.header("Navigation")
+selected_sidebar_tab = st.sidebar.radio("Select Feature", SIDEBAR_TABS)
+
+# --- Main Content Area Logic --- 
+# Display the main tabs unless the Bug Bounty Team is selected in the sidebar
+if selected_sidebar_tab == "🔍 Security Scanner":
+    # Content for the main tabs (Scanner, Results, Report, AI Agent, Tools) is handled above within the `with tabs[...]` blocks.
+    pass # The tab content is already defined above
+
+elif selected_sidebar_tab == "🦾 AI Bug Bounty Team":
+    # Display the AI Bug Bounty Team UI directly in the main area, replacing the tabs
+    st.header("🦾 AI Bug Bounty Hunter Team")
+    st.markdown("A team of specialized AI agents for finding security vulnerabilities, CTFs, and bug bounties.")
+    
+    # Initialize session state for bug bounty results if not already present
+    if 'bb_target' not in st.session_state:
+        st.session_state.bb_target = ""
+    if 'bb_recon_result' not in st.session_state:
+        st.session_state.bb_recon_result = None
+    if 'bb_vuln_result' not in st.session_state:
+        st.session_state.bb_vuln_result = None
+    if 'bb_exploit_result' not in st.session_state:
+        st.session_state.bb_exploit_result = None
+    if 'bb_poc_outputs' not in st.session_state:
+        st.session_state.bb_poc_outputs = []
+    if 'bb_report_result' not in st.session_state:
+        st.session_state.bb_report_result = None
+        
+    with st.form("bb_target_form"):
+        target_input = st.text_input("Enter the target website or repository to analyze:", value=st.session_state.bb_target)
+        submitted = st.form_submit_button("Start Analysis")
+        
+    if submitted and target_input:
+        # Reset previous results when a new target is submitted
+        st.session_state.bb_target = target_input
+        st.session_state.bb_recon_result = None
+        st.session_state.bb_vuln_result = None
+        st.session_state.bb_exploit_result = None
+        st.session_state.bb_poc_outputs = []
+        st.session_state.bb_report_result = None
+        
+        st.info(f"🔍 Starting security analysis for: {st.session_state.bb_target}")
+        checklist = shared_context.get_checklist()
+        initial_user_query = f"Target: {st.session_state.bb_target}\nFind security vulnerabilities. Focus on common web vulnerabilities.\nInitial Checklist: {checklist}"
+        
+        # --- Run Workflow Sequentially & Store Results in Session State --- 
+        # Step 1: Reconnaissance
+        with st.spinner("Running Reconnaissance Phase..."):
+            st.session_state.bb_recon_result = execute_recon_phase(initial_user_query)
+            shared_context.update('recon', st.session_state.bb_recon_result) # Keep updating shared context if needed elsewhere
+            # Display handled below outside the form
+            
+        # Step 2: Vulnerability Scanning (if recon succeeded)
+        if st.session_state.bb_recon_result and "Error:" not in st.session_state.bb_recon_result:
+            with st.spinner("Running Vulnerability Scanning Phase..."):
+                # We need a way to get user feedback if desired, form resets make this tricky
+                # For now, passing empty feedback
+                user_recon_feedback = "" # Placeholder - consider adding an input outside the form later
+                st.session_state.bb_vuln_result = execute_vuln_scan_phase(st.session_state.bb_recon_result, user_recon_feedback, checklist)
+                shared_context.update('vuln_scan', st.session_state.bb_vuln_result)
+        else:
+            st.error("Reconnaissance phase failed. Cannot proceed.")
+
+        # Step 3: Exploit Testing (if vuln scan succeeded)
+        if st.session_state.bb_vuln_result and "Error:" not in st.session_state.bb_vuln_result:
+             with st.spinner("Running Exploit Testing Phase..."):
+                user_vuln_feedback_exploit = "" # Placeholder
+                st.session_state.bb_exploit_result = execute_exploit_phase(st.session_state.bb_vuln_result, user_vuln_feedback_exploit, checklist)
+                shared_context.update('exploit', st.session_state.bb_exploit_result)
+                
+                # Automated PoC execution
+                if st.session_state.bb_exploit_result and "Error:" not in st.session_state.bb_exploit_result:
+                    import re
+                    code_blocks = re.findall(r'```python(.*?)```', st.session_state.bb_exploit_result, re.DOTALL)
+                    st.session_state.bb_poc_outputs = [] # Reset PoC outputs for this run
+                    if code_blocks:
+                        for code in code_blocks:
+                            code = code.strip()
+                            if code: # Ensure code block is not empty
+                                result = run_poc_code(code)
+                                st.session_state.bb_poc_outputs.append({'code': code, 'result': result})
+                    shared_context.update('poc_outputs', st.session_state.bb_poc_outputs)
+                # Display handled below outside the form
+        elif st.session_state.bb_recon_result and "Error:" not in st.session_state.bb_recon_result:
+             st.error("Vulnerability Scanning phase failed. Cannot proceed.")
+
+        # Step 4: Report Generation (if exploit test succeeded or was skipped gracefully)
+        if st.session_state.bb_exploit_result and "Error:" not in st.session_state.bb_exploit_result:
+             with st.spinner("Generating Final Report..."):
+                user_exploit_feedback_final = "" # Placeholder
+                st.session_state.bb_report_result = execute_report_phase(
+                    st.session_state.bb_recon_result,
+                    st.session_state.bb_vuln_result, 
+                    st.session_state.bb_exploit_result, 
+                    st.session_state.bb_poc_outputs, 
+                    user_exploit_feedback_final
+                )
+                shared_context.update('report', st.session_state.bb_report_result)
+        elif st.session_state.bb_vuln_result and "Error:" not in st.session_state.bb_vuln_result:
+             st.error("Exploit Testing phase failed. Cannot generate report.")
+             
+    # --- Display Results from Session State --- 
+    # Display results outside the form to persist after form submission causes rerun
+    if st.session_state.bb_target:
+        st.info(f"Showing results for: {st.session_state.bb_target}")
+        
+        # Display Reconnaissance
+        if st.session_state.bb_recon_result:
+            with st.expander("1️⃣ Reconnaissance Agent Output", expanded=True):
+                st.markdown(st.session_state.bb_recon_result)
+                # Consider adding feedback input here if needed, outside the form
+
+        # Display Vulnerability Scan
+        if st.session_state.bb_vuln_result:
+             with st.expander("2️⃣ Vulnerability Scanner Agent Output", expanded=True):
+                st.markdown(st.session_state.bb_vuln_result)
+        elif st.session_state.bb_recon_result and "Error:" in st.session_state.bb_recon_result:
+            st.error("Reconnaissance phase failed. Cannot proceed.") # Repeat error msg
+
+        # Display Exploit Test
+        if st.session_state.bb_exploit_result:
+            with st.expander("3️⃣ Exploit Testing Agent Output", expanded=True):
+                st.markdown(st.session_state.bb_exploit_result)
+                
+                # Display Automated PoC execution results
+                st.subheader("⚙️ Automated PoC Execution Results")
+                if not st.session_state.bb_poc_outputs:
+                    st.write("No automated PoC code blocks found or executed.")
+                else:
+                    for poc in st.session_state.bb_poc_outputs:
+                        st.code(poc['code'], language='python')
+                        st.write(f"Output: {poc['result'].get('output', 'N/A')}")
+                        st.write(f"Error: {poc['result'].get('error', 'None')}")
+                        st.markdown("---")
+        elif st.session_state.bb_vuln_result and "Error:" in st.session_state.bb_vuln_result:
+             st.error("Vulnerability Scanning phase failed. Cannot proceed.") # Repeat error msg
+
+        # Display Report Generation
+        if st.session_state.bb_report_result:
+             with st.expander("4️⃣ Final Security Report", expanded=True):
+                st.markdown(st.session_state.bb_report_result)
+                # Add download button only if report generated successfully
+                if "Error:" not in st.session_state.bb_report_result:
+                     st.download_button("Download Report", st.session_state.bb_report_result, file_name=f"security_report_{st.session_state.bb_target.replace('.', '_')}.md", mime="text/markdown")
+                else:
+                     st.error("Report generation failed.")
+        elif st.session_state.bb_exploit_result and "Error:" in st.session_state.bb_exploit_result:
+             st.error("Exploit Testing phase failed. Cannot generate report.") # Repeat error msg
 
 # Footer
 st.markdown("---")

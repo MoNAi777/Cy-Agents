@@ -1,16 +1,33 @@
 # See https://help.github.com/ignore-files/ for more about ignoring files.
 
-.DS_Store
+# Environment variables
+.env
+
+# Python virtual environment
+.venv/
+venv/
+env/
 
 # Python cache
-.mypy_cache
-*__pycache__*
-*.egg-info
+__pycache__/
 *.pyc
-*.pytest_cache
-*.ruff_cache
-*.cache*
-*.config*
+*.pyo
+*.pyd
+
+# IDE/Editor specific
+.vscode/
+.idea/
+.cursor-cache/
+
+# Generated reports
+*.json
+
+# Archives
+*.zip
+
+# Other OS/Tool files
+.DS_Store
+Thumbs.db
 
 # Machine specific
 .idea
@@ -37,9 +54,7 @@ wip
 dist
 
 # ignore virtualenvs
-.venv*
 .perfenv*
-venv*
 agnoenv*
 aienv*
 phienv*
