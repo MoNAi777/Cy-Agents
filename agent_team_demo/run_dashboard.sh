@@ -9,4 +9,4 @@ echo "3. Set your OpenAI API key (you can also enter it in the dashboard)"
 echo ""
 echo "Press Ctrl+C to exit the dashboard at any time."
 echo ""
-streamlit run dashboard.py 
+streamlit run security_dashboard.py 

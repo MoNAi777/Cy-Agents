@@ -1,4 +1,5 @@
 <div align="center" id="top">
+  <h1>🛡️ Cy-Agents: Advanced Security Scanner 🛡️</h1>
   <a href="https://docs.agno.com">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="https://agno-public.s3.us-east-1.amazonaws.com/assets/logo-dark.svg">
@@ -15,9 +16,25 @@
 
 ## Introduction
 
-[Agno](https://docs.agno.com) is a lightweight library for building Agents with memory, knowledge, tools and reasoning.
+Cy-Agents is a web application featuring an **Advanced Security Scanner** designed to identify potential vulnerabilities in web applications. It combines automated scanning techniques with AI-powered analysis to provide insights into security posture.
 
-Developers use Agno to build Reasoning Agents, Multimodal Agents, Teams of Agents and Agentic Workflows. Agno also provides a beautiful UI to chat with Agents and tools to monitor and evaluate their performance.
+This application is built using the [Agno](https://docs.agno.com) agent framework and features a user-friendly dashboard created with Streamlit.
+
+## Key Features
+
+*   **Interactive Dashboard:** Easy-to-use web interface built with Streamlit.
+*   **Web Vulnerability Scanning:** Checks for common vulnerabilities, including:
+    *   Cross-Site Scripting (XSS)
+    *   SQL Injection (SQLi)
+    *   Cross-Site Request Forgery (CSRF)
+    *   Insecure Security Headers
+    *   Basic Port Scanning
+*   **AI-Powered Analysis:** Utilizes an AI Agent (powered by Agno and OpenAI) to:
+    *   Analyze scan results.
+    *   Explain vulnerabilities, their impact, and potential remediation steps.
+    *   Answer general web security questions.
+*   **Configurable Scans:** Adjust scan depth, specific tests to run, request timeouts, and concurrency.
+*   **Scan Management:** View scan progress, logs, results, and history.
 
 Here's an Agent that researches and writes a report on a stock, reasoning through each step:
 
@@ -425,6 +442,56 @@ We welcome contributions, read our [contributing guide](https://github.com/agno-
 ## Telemetry
 
 Agno logs which model an agent used so we can prioritize updates to the most popular providers. You can disable this by setting `AGNO_TELEMETRY=false` in your environment.
+
+## Running the Dashboard
+
+1.  **Clone the repository:**
+    ```bash
+    git clone <your-repo-url>
+    cd Cy-Agents
+    ```
+
+2.  **Navigate to the application directory:**
+    ```bash
+    cd agent_team_demo
+    ```
+
+3.  **Install dependencies:**
+    *(Ensure you have Python 3.9+ and pip installed)*
+    ```bash
+    pip install -r requirements.txt
+    ```
+    *(Note: This will also install the core `agno` library if it's not already present via local path or PyPI).*
+
+4.  **Set Environment Variables:**
+    Create a `.env` file in the `agent_team_demo` directory or set environment variables directly. You primarily need your OpenAI API key:
+    ```env
+    OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    ```
+    *(Other keys like `GITHUB_TOKEN` might be used by specific agent tools if configured)*
+
+5.  **Run the Streamlit application:**
+    ```bash
+    streamlit run security_dashboard.py
+    ```
+
+6.  **Access the Dashboard:**
+    Open your web browser and navigate to the URL provided by Streamlit (usually `http://localhost:8501`).
+
+## Technology Stack
+
+*   **Frontend:** Streamlit
+*   **Backend/Agent Logic:** Python, Agno Agent Framework
+*   **AI Model:** OpenAI (GPT-4 Turbo default, configurable)
+*   **Scanning Tools:** Python libraries (requests, beautifulsoup4), custom scan logic.
+
+## Contributing
+
+*(Add contribution guidelines if applicable)*
+
+## License
+
+*(Add license information if applicable)*
 
 <p align="left">
   <a href="#top">⬆️ Back to Top</a>
