@@ -25,6 +25,58 @@ from urllib.parse import urlparse
 import concurrent.futures
 from bs4 import BeautifulSoup
 import pandas as pd
+# Added for real DNS analysis
+import dns.resolver
+import dns.zone
+import dns.query
+import dns.exception
+# Additional imports
+import pandas as pd
+import ssl
+# For port scanning and subdomain enumeration
+import ipaddress
+# requests already imported earlier
+from concurrent.futures import ThreadPoolExecutor, as_completed
+# --- ensure project root is on sys.path so that package imports resolve ---
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent
+for _p in (PROJECT_ROOT, BASE_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
+# Dynamically resolve scanner utilities regardless of execution context
+try:
+    # Standard import when package is discoverable
+    from agent_team_demo.security_scanner import scan_website, stop_current_scan
+    from agent_team_demo.network_utils import expand_port_range, run_port_scan, enumerate_subdomains
+except ModuleNotFoundError:
+    import importlib.util as _ilu
+
+    def _import_from_path(name: str, path: Path):
+        spec = _ilu.spec_from_file_location(name, path)
+        module = _ilu.module_from_spec(spec)  # type: ignore[arg-type]
+        assert spec and spec.loader
+        spec.loader.exec_module(module)  # type: ignore[arg-type]
+        sys.modules[name] = module
+        return module
+
+    _scanner_mod = _import_from_path("_dynamic_scanner", BASE_DIR / "security_scanner.py")
+    _nu_mod = _import_from_path("_dynamic_netutils", BASE_DIR / "network_utils.py")
+
+    scan_website = _scanner_mod.scan_website
+    stop_current_scan = _scanner_mod.stop_current_scan
+
+    expand_port_range = _nu_mod.expand_port_range
+    run_port_scan = _nu_mod.run_port_scan
+    enumerate_subdomains = _nu_mod.enumerate_subdomains
+
+# Helper function defined at the top of the file
+def add_log_entry(message):
+    """Add a log entry to the session state log and print to console for debugging"""
+    if "log" not in st.session_state:
+        st.session_state.log = []
+    st.session_state.log.append(message)
+    print(f"LOG: {message}")
 
 # --- Load .env file FIRST --- 
 # Load environment variables from .env file
@@ -334,7 +386,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Create tabs for the main dashboard sections (excluding the AI Bug Bounty Team)
-tabs = st.tabs(["🔍 Security Scanner", "📊 Scan Results", "📝 Security Report", "🤖 AI Agent", "⚙️ Advanced Tools"])
+tabs = st.tabs(["🔍 Security Scanner", "📊 Scan Results", "📝 Security Report", "🤖 AI Agent", "🛡️ Code Coach", "⚙️ Advanced Tools"])
 
 # Add Python tool decorator for custom agent tools
 def tool(name=None, description=None, show_result=True, stop_after_tool_call=False, 
@@ -493,7 +545,7 @@ def analyze_with_ai(prompt, scan_results=None):
     except Exception as e:
         return f"Error analyzing with AI: {str(e)}"
 
-# Initialize session state
+# Initialize session state BEFORE it's used elsewhere
 if "scan_results" not in st.session_state:
     st.session_state.scan_results = None
 if "scanning" not in st.session_state:
@@ -514,41 +566,39 @@ if "security_agent" not in st.session_state:
     st.session_state.security_agent = None
 if 'ai_enabled' not in st.session_state:
     st.session_state.ai_enabled = load_ai_capabilities()
-
-# Sidebar for inputs
-with st.sidebar:
-    st.subheader("Scan Configuration")
-    
-    target_url = st.text_input("Target URL", placeholder="https://example.com")
-    
-    st.markdown("---")
-    
-    st.subheader("Scan Options")
-    scan_depth = st.slider("Crawl Depth", 1, 5, 2)
-    
-    scan_options = st.multiselect(
-        "Security Tests",
-        ["XSS", "SQL Injection", "CSRF", "Security Headers", "Port Scan"],
-        default=["XSS", "SQL Injection", "CSRF", "Security Headers"]
-    )
-    
-    st.markdown("---")
-    
-    st.subheader("Advanced Options")
-    threads = st.slider("Threads", 1, 10, 3)
-    timeout = st.slider("Request Timeout (seconds)", 1, 30, 10)
-    
-    st.markdown("---")
-    
-    scan_button = st.button("Start Scan", type="primary", disabled=st.session_state.scanning)
+if "target_url" not in st.session_state:
+    st.session_state.target_url = ""
 
 # Function to run security scan
 def run_security_scan():
+    # Get scan parameters from session state
+    scan_depth = st.session_state.get("scan_depth", 2)
+    scan_options = st.session_state.get("scan_options", ["XSS", "SQL Injection", "Security Headers"])
+    threads = st.session_state.get("threads", 3)
+    timeout = st.session_state.get("timeout", 10)
+    
+    # Get target URL from sidebar or main input
+    current_target_url = ""
+    
+    # Check if target_url is in locals (from sidebar)
+    if 'target_url' in locals() and target_url:
+        current_target_url = target_url
+    # Otherwise check if it's in session state
+    elif "target_url" in st.session_state and st.session_state.target_url:
+        current_target_url = st.session_state.target_url
+    
+    # Fix @ symbol that might be at the start of the URL
+    if current_target_url and current_target_url.startswith('@'):
+        current_target_url = current_target_url[1:]
+    
     # Validate URL
-    if not target_url or not re.match(r'^https?://', target_url):
+    if not current_target_url or not re.match(r'^https?://', current_target_url):
         st.error("Invalid URL. Please enter a valid URL starting with http:// or https://")
         st.session_state.scanning = False
         return
+    
+    # Update session state with current target
+    st.session_state.target_url = current_target_url
     
     # Use a container to update scanning status
     status_container = st.empty()
@@ -560,18 +610,18 @@ def run_security_scan():
     # Progress bar
     progress_bar = st.progress(0)
     
+    # Define update_log at the top so it's always in scope
+    log_output = []
+    def update_log():
+        log_placeholder.markdown("\n".join([f"- {entry}" for entry in log_output]))
+    
     try:
         # Reset session state for the scan
         st.session_state.log = []
         st.session_state.vulnerability_count = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
         
-        # Log initialization
-        log_output = ["Starting scan...", f"Target URL: {target_url}", f"Scan depth: {scan_depth}"]
-        
-        # Update log display
-        def update_log():
-            log_placeholder.markdown("\\n".join([f"- {entry}" for entry in log_output]))
-        
+        # Initialize log output array directly
+        log_output[:] = ["Starting scan...", f"Target URL: {current_target_url}", f"Scan depth: {scan_depth}"]
         update_log()
         
         # Prepare scan command
@@ -591,29 +641,57 @@ def run_security_scan():
         update_log()
         progress_bar.progress(10)
         
-        # Create the scanner function with a way to update progress
-        def progress_callback(value, message=None):
+        progress_val = 5  # initial value already set above
+
+        def website_callback(value: int | None = None, message: str | None = None):
+            """Adapt SecurityScanner callback (message‑only) to our progress & log UI."""
+            nonlocal progress_val
             if value is not None:
-                progress_bar.progress(value)
+                progress_val = value
+            else:
+                progress_val = min(progress_val + 3, 95)
+            progress_bar.progress(progress_val)
             if message:
                 log_output.append(message)
                 update_log()
         
         # Run the scan
-        results = run_embedded_scan(target_url, scan_depth, scan_options, timeout, progress_callback)
+        results = scan_website(
+            current_target_url,
+            scan_depth,
+            scan_options,
+            threads,
+            timeout,
+            website_callback,
+        )
         
-        # Create JSON report
+        # Build report data from real scanner structure
+        stats = results.get("stats", {})
         report_data = {
-            "target_url": target_url,
+            "target_url": current_target_url,
             "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "server_info": results["server_info"],
+            "server_info": results.get("server_info", {}),
             "stats": {
-                "urls_scanned": results["urls_scanned"],
-                "forms_analyzed": results["forms_analyzed"],
-                "total_vulnerabilities": len(results["vulnerabilities"])
+                "urls_scanned": stats.get("urls_scanned", 0),
+                "forms_analyzed": stats.get("forms_analyzed", 0),
+                "total_vulnerabilities": stats.get("total_vulnerabilities", len(results.get("vulnerabilities", []))),
             },
-            "vulnerabilities": results["vulnerabilities"]
+            "vulnerabilities": results.get("vulnerabilities", []),
         }
+        
+        # Compute vulnerability counts by severity
+        severity_map = {
+            "critical": "critical",
+            "high": "high",
+            "medium": "medium",
+            "low": "low",
+            "info": "info",
+        }
+        vuln_count = {k: 0 for k in severity_map}
+        for v in report_data["vulnerabilities"]:
+            sev = v.get("severity", "").lower()
+            if sev in vuln_count:
+                vuln_count[sev] += 1
         
         # Save report
         report_path = os.path.join(os.getcwd(), report_filename)
@@ -623,7 +701,7 @@ def run_security_scan():
         # Update session state
         st.session_state.report_path = report_path
         st.session_state.scan_results = report_data
-        st.session_state.vulnerability_count = results["vuln_count"]
+        st.session_state.vulnerability_count = vuln_count
         st.session_state.log = log_output
         
         # Complete the progress
@@ -631,706 +709,159 @@ def run_security_scan():
         status_container.success("Scan completed successfully!")
         
     except Exception as e:
-        log_output.append(f"Error during scan: {str(e)}")
+        print(f"LOG: Error during scan: {str(e)}")
+        error_message = f"Error during scan: {str(e)}"
+        if not log_output:
+            log_output[:] = ["Starting scan...", error_message]
+        else:
+            log_output.append(error_message)
         update_log()
-        status_container.error(f"Scan failed: {str(e)}")
+        status_container.error(error_message)
         traceback.print_exc()
     
     finally:
         st.session_state.scanning = False
 
-# Function for embedded security scanning
-def run_embedded_scan(url, depth, scan_options, timeout_value, progress_callback):
-    # Initialize results
-    results = {
-        "server_info": {"server": "Unknown"},
-        "urls_scanned": 0,
-        "forms_analyzed": 0,
-        "vulnerabilities": [],
-        "vuln_count": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
-    }
-    
-    # Track visited URLs to avoid duplicates
-    visited_urls = set()
-    urls_to_scan = [url]
-    scanned_forms = set()
-    
-    # Track current progress for updating progress bar
-    current_progress = 0
-    
-    try:
-        # Suppress InsecureRequestWarning
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        
-        # Basic server info gathering
-        current_progress = 15
-        progress_callback(current_progress, "[*] Starting reconnaissance phase...")
-        current_progress = 20
-        progress_callback(current_progress, f"[*] Gathering server information for {url}")
-        
-        try:
-            response = requests.get(url, verify=False, timeout=timeout_value, allow_redirects=True)
-            results["urls_scanned"] += 1
-            visited_urls.add(url)
-            
-            # Extract server info
-            server = response.headers.get('Server', 'Not disclosed')
-            results["server_info"]["server"] = server
-            current_progress = 22
-            progress_callback(current_progress, f"[+] Server: {server}")
-            
-            # Check for open ports if port scan is enabled
-            if "Port Scan" in scan_options:
-                try:
-                    parsed_url = urlparse(url)
-                    hostname = parsed_url.netloc
-                    if ':' in hostname:
-                        hostname = hostname.split(':')[0]
-                    
-                    current_progress = 25
-                    progress_callback(current_progress, f"[*] Checking common ports on {hostname}")
-                    open_ports = []
-                    common_ports = [80, 443, 8080, 8443, 21, 22, 23, 25, 3306]
-                    
-                    for port in common_ports[:3]:  # Limit to first few ports to avoid excessive scanning
-                        try:
-                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                            sock.settimeout(1)
-                            result = sock.connect_ex((hostname, port))
-                            if result == 0:
-                                open_ports.append(port)
-                            sock.close()
-                        except:
-                            pass
-                    
-                    if open_ports:
-                        current_progress = 28
-                        progress_callback(current_progress, f"[+] Open ports detected: {', '.join(map(str, open_ports))}")
-                        results["server_info"]["open_ports"] = open_ports
-                except Exception as e:
-                    current_progress = 28
-                    progress_callback(current_progress, f"[!] Error during port scan: {str(e)}")
-        
-        except Exception as e:
-            current_progress = 25
-            progress_callback(current_progress, f"[!] Error connecting to {url}: {str(e)}")
-        
-        # Check security headers if enabled
-        if "Security Headers" in scan_options:
-            current_progress = 30
-            progress_callback(current_progress, f"[*] Checking security headers")
-            
-            security_headers = {
-                "Strict-Transport-Security": {
-                    "description": "The Strict-Transport-Security header is missing, which may lead to security issues.",
-                    "severity": "Medium",
-                    "remediation": "Add the Strict-Transport-Security header with a suitable max-age directive."
-                },
-                "Content-Security-Policy": {
-                    "description": "The Content-Security-Policy header is missing, which may lead to security issues.",
-                    "severity": "Medium",
-                    "remediation": "Implement a Content Security Policy to prevent XSS attacks."
-                },
-                "X-Content-Type-Options": {
-                    "description": "The X-Content-Type-Options header is missing, which may lead to security issues.",
-                    "severity": "Medium",
-                    "remediation": "Add the X-Content-Type-Options header with the nosniff directive."
-                },
-                "X-Frame-Options": {
-                    "description": "The X-Frame-Options header is missing, which may lead to security issues.",
-                    "severity": "Medium",
-                    "remediation": "Add the X-Frame-Options header with DENY or SAMEORIGIN value."
-                },
-                "X-XSS-Protection": {
-                    "description": "The X-XSS-Protection header is missing, which may lead to security issues.",
-                    "severity": "Medium",
-                    "remediation": "Add the X-XSS-Protection header with mode=block directive."
-                }
-            }
-            
-            if 'response' in locals():
-                # Check for missing security headers
-                for header, info in security_headers.items():
-                    if header not in response.headers:
-                        current_progress = 32
-                        progress_callback(current_progress, f"[!] Missing {header} header")
-                        
-                        # Add vulnerability
-                        vuln = {
-                            "name": f"Missing {header} Header",
-                            "description": info["description"],
-                            "severity": info["severity"],
-                            "url": url,
-                            "evidence": f"Missing {header} header",
-                            "remediation": info["remediation"]
-                        }
-                        results["vulnerabilities"].append(vuln)
-                        results["vuln_count"][info["severity"].lower()] += 1
-        
-        # Start crawling and vulnerability detection
-        current_progress = 35
-        progress_callback(current_progress, f"[*] Starting crawling and vulnerability detection...")
-        
-        current_depth = 1
-        while urls_to_scan and current_depth <= depth:
-            next_urls = []
-            
-            # Update progress based on current depth
-            current_progress = min(35 + int(50 * (current_depth / depth)), 85)
-            progress_callback(current_progress, f"[*] Processing URLs at depth {current_depth}/{depth}")
-            
-            for current_url in urls_to_scan:
-                if current_url in visited_urls:
-                    continue
-                
-                visited_urls.add(current_url)
-                progress_callback(current_progress, f"[*] Crawling: {current_url} (Depth: {current_depth}/{depth})")
-                
-                try:
-                    response = requests.get(current_url, verify=False, timeout=timeout_value, allow_redirects=True)
-                    results["urls_scanned"] += 1
-                    
-                    # Test URL parameters for vulnerabilities
-                    parsed_url = urlparse(current_url)
-                    if parsed_url.query:
-                        progress_callback(current_progress, f"[*] Testing URL parameters for vulnerabilities")
-                        query_params = parsed_url.query.split('&')
-                        for param in query_params:
-                            if '=' in param:
-                                param_name = param.split('=')[0]
-                                
-                                # Test for XSS if enabled
-                                if "XSS" in scan_options:
-                                    progress_callback(current_progress, f"[*] Testing parameter '{param_name}' for XSS")
-                                    test_url = f"{current_url.split('?')[0]}?{param_name}=<script>alert(1)</script>"
-                                    try:
-                                        xss_test_response = requests.get(test_url, verify=False, timeout=timeout_value, allow_redirects=True)
-                                        if "<script>alert(1)</script>" in xss_test_response.text and "<script>alert(1)</script>" not in xss_test_response.url:
-                                            progress_callback(current_progress, f"[!] XSS vulnerability found in parameter '{param_name}'")
-                                            vuln = {
-                                                "name": "Reflected XSS Vulnerability",
-                                                "description": f"The parameter '{param_name}' is vulnerable to Cross-Site Scripting (XSS) attacks.",
-                                                "severity": "High",
-                                                "url": current_url,
-                                                "evidence": f"Parameter '{param_name}' is vulnerable to XSS with payload: <script>alert(1)</script>",
-                                                "payload": "<script>alert(1)</script>",
-                                                "remediation": "Implement proper input validation and output encoding for user-supplied data."
-                                            }
-                                            results["vulnerabilities"].append(vuln)
-                                            results["vuln_count"]["high"] += 1
-                                    except Exception as e:
-                                        progress_callback(current_progress, f"[!] Error testing XSS on parameter '{param_name}': {str(e)}")
-                                
-                                # Test for SQL Injection if enabled
-                                if "SQL Injection" in scan_options:
-                                    progress_callback(current_progress, f"[*] Testing parameter '{param_name}' for SQL Injection")
-                                    sqli_payloads = ["'", "1' OR '1'='1", "1' AND '1'='2"]
-                                    for payload in sqli_payloads:
-                                        test_url = f"{current_url.split('?')[0]}?{param_name}={payload}"
-                                        try:
-                                            sqli_test_response = requests.get(test_url, verify=False, timeout=timeout_value, allow_redirects=True)
-                                            # Check for common SQL error patterns
-                                            sql_errors = [
-                                                "SQL syntax", "mysql_fetch", "ORA-", 
-                                                "Microsoft SQL Server", "PostgreSQL", 
-                                                "SQLite", "Unclosed quotation mark"
-                                            ]
-                                            if any(error in sqli_test_response.text for error in sql_errors):
-                                                progress_callback(current_progress, f"[!] SQL injection vulnerability found in parameter '{param_name}'")
-                                                vuln = {
-                                                    "name": "SQL Injection Vulnerability",
-                                                    "description": f"The parameter '{param_name}' is vulnerable to SQL Injection attacks.",
-                                                    "severity": "Critical",
-                                                    "url": current_url,
-                                                    "evidence": f"SQL error pattern found in response to payload: {payload}",
-                                                    "payload": payload,
-                                                    "remediation": "Use parameterized queries or prepared statements instead of string concatenation."
-                                                }
-                                                results["vulnerabilities"].append(vuln)
-                                                results["vuln_count"]["critical"] += 1
-                                                break
-                                        except Exception as e:
-                                            progress_callback(current_progress, f"[!] Error testing SQL injection on parameter '{param_name}': {str(e)}")
-                    
-                    # Extract and analyze forms if enabled
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                    forms = soup.find_all('form')
-                    
-                    for form in forms:
-                        form_action = form.get('action', '')
-                        if not form_action:
-                            form_action = current_url
-                        elif not form_action.startswith('http'):
-                            # Resolve relative URL
-                            if form_action.startswith('/'):
-                                base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                                form_action = base_url + form_action
-                            else:
-                                form_action = current_url.rsplit('/', 1)[0] + '/' + form_action
-                        
-                        form_method = form.get('method', 'get').lower()
-                        form_id = f"{form_action}_{form_method}"
-                        
-                        if form_id in scanned_forms:
-                            continue
-                        
-                        scanned_forms.add(form_id)
-                        results["forms_analyzed"] += 1
-                        
-                        # Simplified testing for demonstration purposes
-                        # In a real scanner, we'd do actual requests with test payloads
-                        
-                        # Find form inputs
-                        inputs = form.find_all(['input', 'textarea'])
-                        
-                        # Test for XSS if enabled
-                        if "XSS" in scan_options and inputs:
-                            progress_callback(current_progress, f"[*] Testing form for XSS: {form_action}")
-                            
-                            # For demonstration, find a random input field to mark as vulnerable
-                            if random.random() < 0.3:  # 30% chance to find vulnerability
-                                input_field = random.choice(inputs)
-                                input_name = input_field.get('name', 'unknown')
-                                
-                                progress_callback(current_progress, f"[!] XSS vulnerability found in form input '{input_name}'")
-                                vuln = {
-                                    "name": "Reflected XSS Vulnerability",
-                                    "description": f"Form input '{input_name}' is vulnerable to Cross-Site Scripting (XSS) attacks.",
-                                    "severity": "High",
-                                    "url": form_action,
-                                    "evidence": f"Form input '{input_name}' reflects XSS payload without encoding",
-                                    "payload": "<script>alert(1)</script>",
-                                    "remediation": "Implement proper input validation and output encoding for user-supplied data."
-                                }
-                                results["vulnerabilities"].append(vuln)
-                                results["vuln_count"]["high"] += 1
-                        
-                        # Test for SQL Injection if enabled
-                        if "SQL Injection" in scan_options and inputs:
-                            progress_callback(current_progress, f"[*] Testing form for SQL Injection: {form_action}")
-                            
-                            # For demonstration, find a random input field to mark as vulnerable
-                            if random.random() < 0.2:  # 20% chance to find vulnerability
-                                input_field = random.choice(inputs)
-                                input_name = input_field.get('name', 'unknown')
-                                
-                                progress_callback(current_progress, f"[!] SQL injection vulnerability found in form input '{input_name}'")
-                                vuln = {
-                                    "name": "SQL Injection Vulnerability",
-                                    "description": f"Form input '{input_name}' is vulnerable to SQL Injection attacks.",
-                                    "severity": "Critical",
-                                    "url": form_action,
-                                    "evidence": f"SQL error pattern found in response when submitting payload",
-                                    "payload": "' OR '1'='1",
-                                    "remediation": "Use parameterized queries or prepared statements instead of string concatenation."
-                                }
-                                results["vulnerabilities"].append(vuln)
-                                results["vuln_count"]["critical"] += 1
-                        
-                        # Test for CSRF vulnerabilities if enabled
-                        if "CSRF" in scan_options and form_method == 'post':
-                            progress_callback(current_progress, f"[*] Testing form for CSRF vulnerabilities")
-                            
-                            # Check for CSRF tokens in the form
-                            csrf_tokens = [
-                                input_tag.get('name', '').lower() 
-                                for input_tag in form.find_all('input') 
-                                if 'csrf' in input_tag.get('name', '').lower() 
-                                or 'token' in input_tag.get('name', '').lower()
-                            ]
-                            
-                            if not csrf_tokens:
-                                progress_callback(current_progress, f"[!] Potential CSRF vulnerability found in form: {form_action}")
-                                vuln = {
-                                    "name": "CSRF Vulnerability",
-                                    "description": "Form does not contain CSRF protection token",
-                                    "severity": "Medium",
-                                    "url": form_action,
-                                    "evidence": "POST form without CSRF token",
-                                    "remediation": "Implement proper CSRF protection using tokens or same-site cookies."
-                                }
-                                results["vulnerabilities"].append(vuln)
-                                results["vuln_count"]["medium"] += 1
-                    
-                    # Find links for next level crawling
-                    if current_depth < depth:
-                        links = soup.find_all('a', href=True)
-                        for link in links:
-                            href = link['href']
-                            if not href or href.startswith('#') or href.startswith('javascript:'):
-                                continue
-                            
-                            # Resolve relative URLs
-                            if not href.startswith('http'):
-                                if href.startswith('/'):
-                                    base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                                    href = base_url + href
-                                else:
-                                    href = current_url.rsplit('/', 1)[0] + '/' + href
-                            
-                            # Make sure we stay on the same domain
-                            if urlparse(href).netloc == parsed_url.netloc and href not in visited_urls:
-                                next_urls.append(href)
-                
-                except Exception as e:
-                    progress_callback(current_progress, f"[!] Error processing {current_url}: {str(e)}")
-            
-            urls_to_scan = next_urls
-            current_depth += 1
-        
-        # Final progress update
-        current_progress = 90
-        progress_callback(current_progress, f"[+] Scan Complete")
-        
-        # Add summary statistics
-        current_progress = 95
-        progress_callback(current_progress, f"[+] URLs Scanned: {results['urls_scanned']}")
-        current_progress = 96
-        progress_callback(current_progress, f"[+] Forms Analyzed: {results['forms_analyzed']}")
-        current_progress = 97
-        progress_callback(current_progress, f"[+] Vulnerabilities Found: {len(results['vulnerabilities'])}")
-        
-        # Group vulnerabilities by severity for display
-        vuln_by_severity = {
-            "Critical": sum(1 for v in results["vulnerabilities"] if v.get("severity") == "Critical"),
-            "High": sum(1 for v in results["vulnerabilities"] if v.get("severity") == "High"),
-            "Medium": sum(1 for v in results["vulnerabilities"] if v.get("severity") == "Medium"),
-            "Low": sum(1 for v in results["vulnerabilities"] if v.get("severity") == "Low"),
-            "Info": sum(1 for v in results["vulnerabilities"] if v.get("severity") == "Info"),
-        }
-        
-        for severity, count in vuln_by_severity.items():
-            if count > 0:
-                progress_callback(current_progress, f"[+] {severity} Vulnerabilities: {count}")
-        
-        current_progress = 100
-        progress_callback(current_progress, "[+] Security scan completed successfully")
-    
-    except Exception as e:
-        # Ensure we always complete the progress bar even if there's an error
-        current_progress = 100
-        progress_callback(current_progress, f"Error in security scan: {str(e)}")
-        progress_callback(current_progress, traceback.format_exc())
-    
-    return results
-
-# Start scan if button is clicked
-if scan_button:
-    # Don't use threading as it causes issues with Streamlit's session state
-    st.session_state.scanning = True
-    st.session_state.progress = 0
-    # Run scan directly instead of in a thread
-    run_security_scan()
-
 # Security Scanner Tab - Use existing tabs from above, don't create new ones
 with tabs[0]:
     st.subheader("Security Scanner")
-    
-    # Target URL input (only visible here, not in the sidebar)
-    target_url_input = st.text_input("Target URL", placeholder="https://example.com", value=target_url if 'target_url' in locals() else "", key="target_url_main")
-    
-    # Update the sidebar value if this one changes
-    if target_url_input and 'target_url' in locals() and target_url_input != target_url:
-        target_url = target_url_input
-    
-    # Display scan options
-    col1, col2 = st.columns([3, 1])
-    
-    with col1:
+    with st.form("scan_form"):
+        st.markdown("#### Target URL")
+        target_url_input = st.text_input("Target URL", placeholder="https://example.com", value=st.session_state.get("target_url", ""), key="target_url_main", help="Full URL including scheme e.g. https://my.site")
         st.markdown("#### Scan Options")
-        scan_depth_input = st.slider("Crawl Depth", 1, 5, scan_depth if 'scan_depth' in locals() else 2, key="scan_depth_main")
-        
-        # Update the sidebar value if this one changes
-        if 'scan_depth' in locals() and scan_depth_input != scan_depth:
-            scan_depth = scan_depth_input
-        
+        scan_depth_input = st.slider("Crawl Depth", 1, 5, st.session_state.get("scan_depth", 2), key="scan_depth_main")
         scan_options_input = st.multiselect(
             "Security Tests",
             ["XSS", "SQL Injection", "CSRF", "Security Headers", "Port Scan"],
-            default=scan_options if 'scan_options' in locals() else ["XSS", "SQL Injection", "Security Headers"],
+            default=st.session_state.get("scan_options", ["XSS", "SQL Injection", "Security Headers"]),
             key="scan_options_main"
         )
-        
-        # Update the sidebar value if this one changes
-        if 'scan_options' in locals() and scan_options_input != scan_options:
-            scan_options = scan_options_input
-    
-    with col2:
-        st.markdown("#### Advanced Options")
-        threads_input = st.slider("Threads", 1, 10, threads if 'threads' in locals() else 3, key="threads_main")
-        timeout_input = st.slider("Timeout (s)", 1, 30, timeout if 'timeout' in locals() else 10, key="timeout_main")
-        
-        # Update the sidebar values if these change
-        if 'threads' in locals() and threads_input != threads:
-            threads = threads_input
-        if 'timeout' in locals() and timeout_input != timeout:
-            timeout = timeout_input
-    
-    # Scan button
-    scan_col1, scan_col2 = st.columns([3, 1])
-    with scan_col1:
-        start_scan_button = st.button("🔍 Start Security Scan", type="primary", disabled=st.session_state.scanning, key="start_scan_main")
-    with scan_col2:
-        if st.session_state.scanning:
-            st.markdown("### ⌛")
-    
-    # If scan button is clicked
+        with st.expander("Advanced Options"):
+            threads_input = st.slider("Threads", 1, 10, st.session_state.get("threads", 3), key="threads_main")
+            timeout_input = st.slider("Timeout (s)", 1, 30, st.session_state.get("timeout", 10), key="timeout_main")
+        start_scan_button = st.form_submit_button(
+            "🔍 Start Security Scan",
+            disabled=st.session_state.get("scanning", False),
+            help="Start a new security scan"
+        )
     if start_scan_button:
         if not target_url_input:
             st.error("Please enter a target URL")
         else:
-            st.session_state.scanning = True
+            st.session_state["target_url"] = target_url_input.strip()
+            st.session_state["scan_depth"] = scan_depth_input
+            st.session_state["scan_options"] = scan_options_input
+            st.session_state["threads"] = threads_input
+            st.session_state["timeout"] = timeout_input
+            st.session_state["scanning"] = True
+            st.session_state["progress"] = 0
             run_security_scan()
-    
-    # Display scan status
-    if st.session_state.scanning:
+    if st.session_state.get("scanning", False):
         st.info("Scan in progress... Please wait")
-    
-    # If there are scan logs, show them in an expander
-    if st.session_state.log:
+    if st.session_state.get("log"):
         with st.expander("Scan Logs", expanded=True):
-            for log_entry in st.session_state.log:
+            for log_entry in st.session_state["log"]:
                 st.markdown(f"- {log_entry}")
 
 # Scan Results Tab
 with tabs[1]:
     if st.session_state.scan_results:
         data = st.session_state.scan_results
-        
-        # Filter options
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("Filter Vulnerabilities")
-        
-        severity_filter = st.sidebar.multiselect(
-            "Severity",
-            ["Critical", "High", "Medium", "Low", "Info"],
-            default=["Critical", "High", "Medium"]
-        )
-        
-        vuln_type_filter = st.sidebar.multiselect(
-            "Vulnerability Type",
-            ["XSS", "SQL Injection", "CSRF", "Missing Headers", "Other"],
-            default=["XSS", "SQL Injection", "CSRF", "Missing Headers"]
-        )
-        
-        # Filter and display vulnerabilities
-        if "vulnerabilities" in data:
-            vulns = data["vulnerabilities"]
-            
-            # Filter by severity
-            if severity_filter:
-                vulns = [v for v in vulns if v.get("severity", "").capitalize() in severity_filter]
-            
-            # Filter by type
-            if vuln_type_filter:
-                filtered_vulns = []
-                for v in vulns:
-                    vuln_name = v.get("name", "").lower()
-                    if "xss" in vuln_name and "XSS" in vuln_type_filter:
-                        filtered_vulns.append(v)
-                    elif "sql" in vuln_name and "SQL Injection" in vuln_type_filter:
-                        filtered_vulns.append(v)
-                    elif "csrf" in vuln_name and "CSRF" in vuln_type_filter:
-                        filtered_vulns.append(v)
-                    elif "header" in vuln_name and "Missing Headers" in vuln_type_filter:
-                        filtered_vulns.append(v)
-                    elif "Other" in vuln_type_filter:
-                        if not any(x in vuln_name for x in ["xss", "sql", "csrf", "header"]):
-                            filtered_vulns.append(v)
-                vulns = filtered_vulns
-            
-            # Display vulnerabilities
-            st.markdown(f"<h3 style='margin-top:15px;margin-bottom:20px;'>Found {len(vulns)} Vulnerabilities</h3>", unsafe_allow_html=True)
-            
-            # Group vulnerabilities by type for better organization
-            vuln_groups = {}
-            for vuln in vulns:
-                vuln_type = "Other"
-                vuln_name = vuln.get("name", "").lower()
-                if "xss" in vuln_name:
-                    vuln_type = "XSS"
-                elif "sql" in vuln_name:
-                    vuln_type = "SQL Injection"
-                elif "csrf" in vuln_name:
-                    vuln_type = "CSRF"
-                elif "header" in vuln_name:
-                    vuln_type = "Missing Headers"
-                
-                if vuln_type not in vuln_groups:
-                    vuln_groups[vuln_type] = []
-                vuln_groups[vuln_type].append(vuln)
-            
-            # Display vulnerabilities by group
-            for vuln_type, group_vulns in vuln_groups.items():
-                with st.expander(f"{vuln_type} Vulnerabilities ({len(group_vulns)})", expanded=True):
-                    for i, vuln in enumerate(group_vulns):
-                        severity = vuln.get("severity", "").lower()
-                        
-                        # Create a better formatted vulnerability card
-                        st.markdown(f"""
-                        <div class='vulnerability-card {severity}' style='margin-bottom:20px;'>
-                            <div style='display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #6c7086;padding-bottom:10px;margin-bottom:15px;'>
-                                <h4 style='margin:0;'>{vuln.get('name', 'Unknown Vulnerability')}</h4>
-                                <span style='background-color:{{"critical":"#f38ba8","high":"#fab387","medium":"#f9e2af","low":"#a6e3a1","info":"#89b4fa"}}.get(severity,"#cdd6f4");color:#1e1e2e;padding:3px 8px;border-radius:4px;font-weight:bold;'>{vuln.get('severity', 'Unknown')}</span>
-                            </div>
-                            
-                            <div style='display:flex;flex-wrap:wrap;gap:10px;margin-bottom:15px;'>
-                                <div style='flex:1;min-width:300px;'>
-                                    <p><strong>URL:</strong> <span style='word-break:break-all;'>{vuln.get('url', 'N/A')}</span></p>
-                                    <p><strong>Description:</strong> {vuln.get('description', 'No description available')}</p>
-                                </div>
-                                
-                                <div style='flex:1;min-width:300px;'>
-                                    <p><strong>Evidence:</strong> <span style='font-family:monospace;'>{vuln.get('evidence', 'No evidence provided')}</span></p>
-                                    {f"<p><strong>Payload:</strong> <code style='background-color:#1e1e2e;padding:3px 6px;border-radius:3px;'>{vuln.get('payload', '')}</code></p>" if vuln.get('payload') else ""}
-                                </div>
-                            </div>
-                            
-                            <div style='background-color:#1e1e2e;padding:15px;border-radius:5px;margin-top:10px;'>
-                                <p style='margin:0;'><strong>Remediation:</strong> {vuln.get('remediation', 'No remediation advice available')}</p>
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-        
-            # If no vulnerabilities match filters
-            if not vulns:
-                st.info("No vulnerabilities match your current filters. Try adjusting your filter settings.")
-        else:
-            st.info("No vulnerability data found in the scan results.")
+        # Show all vulnerabilities without filtering by type
+        vulns = data.get("vulnerabilities", [])
+        st.markdown(f"<h3 style='margin-top:15px;margin-bottom:20px;'>Found {len(vulns)} Vulnerabilities</h3>", unsafe_allow_html=True)
+        for i, vuln in enumerate(vulns):
+            severity = vuln.get("severity", "").lower()
+            with st.expander(f"{i+1}. {vuln.get('title', vuln.get('name', 'Unknown'))} ({vuln.get('severity', 'Unknown')})", expanded=True):
+                for k, v in vuln.items():
+                    st.markdown(f"**{k.title()}:** {v}")
+        if "external_tools" in data:
+            st.markdown("---")
+            st.subheader("External Tools Output")
+            for tool, output in data["external_tools"].items():
+                with st.expander(f"{tool} Output"):
+                    if isinstance(output, (list, dict)):
+                        st.json(output)
+                    else:
+                        st.code(str(output))
+        with st.expander("Show Raw Results JSON"):
+            st.json(data)
     else:
-        # Show a message when no scan has been run
-        st.markdown("""
-        <div style="background-color:#313244;border-radius:10px;padding:30px;margin-top:30px;text-align:center;box-shadow:0 4px 8px rgba(0,0,0,0.3);">
-            <h3 style="margin-top:0;">No Vulnerabilities to Display</h3>
-            <p>Run a scan first to identify security vulnerabilities in your target application.</p>
-            <div style="margin-top:20px;font-size:40px;">🔍</div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.info("No scan results available. Run a scan first.")
 
 # Security Report Tab
 with tabs[2]:
     if report_module_available:
-        # Use the new report tab module
         render_report_tab(tabs[2])
     else:
-        # Fallback to the built-in report tab
         st.markdown("### 📝 Security Report")
-        
-        # Only show report when scan results exist
         if st.session_state.scan_results and st.session_state.report_path:
-            # Current timestamp for display
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            st.success("Security scan completed. Report generated successfully.")
-            
-            # Display report summary
-            st.subheader("Report Summary")
-            
-            # Get data from results
             data = st.session_state.scan_results
-            target_url = data.get('target_url', 'N/A')
-            scan_time = data.get('scan_time', 'N/A')
-            
-            # Target information
-            st.markdown("**Target Information**")
-            st.markdown(f"- **URL:** {target_url}")
-            st.markdown(f"- **Scan Date:** {scan_time}")
-            st.markdown(f"- **Report Generated:** {timestamp}")
-            
-            # Server info if available
-            if 'server_info' in data:
-                server = data['server_info'].get('server', 'Not disclosed')
-                st.markdown(f"- **Server:** {server}")
-            
-            st.markdown("---")
-            
-            # Statistics
-            st.markdown("**Scan Statistics**")
-            if 'stats' in data:
-                st.markdown(f"- **URLs Scanned:** {data['stats'].get('urls_scanned', 0)}")
-                st.markdown(f"- **Forms Analyzed:** {data['stats'].get('forms_analyzed', 0)}")
-                st.markdown(f"- **Total Vulnerabilities:** {data['stats'].get('total_vulnerabilities', 0)}")
-            
-            # Display vulnerabilities by severity
-            st.markdown("---")
-            st.subheader("Vulnerabilities by Severity")
-            
+            # Executive Summary
+            st.subheader("Executive Summary")
+            st.markdown(f"**Target:** {data.get('target_url', 'N/A')}")
+            st.markdown(f"**Scan Date:** {data.get('scan_time', 'N/A')}")
             vuln_count = st.session_state.vulnerability_count
-            
-            # Use columns for better layout
-            col1, col2, col3, col4, col5 = st.columns(5)
-            with col1:
-                st.metric("Critical", vuln_count.get('critical', 0), delta=None)
-            with col2:
-                st.metric("High", vuln_count.get('high', 0), delta=None)
-            with col3:
-                st.metric("Medium", vuln_count.get('medium', 0), delta=None)
-            with col4:
-                st.metric("Low", vuln_count.get('low', 0), delta=None)
-            with col5:
-                st.metric("Info", vuln_count.get('info', 0), delta=None)
-            
-            # Display detailed vulnerabilities
+            total_vulns = sum(vuln_count.values())
+            st.markdown(f"**Total Vulnerabilities:** {total_vulns}")
+            st.markdown(f"**Risk Level:** {'High' if vuln_count.get('critical',0) or vuln_count.get('high',0) else 'Medium' if vuln_count.get('medium',0) else 'Low'}")
             st.markdown("---")
-            st.subheader("Detailed Findings")
-            
+            # Methodology
+            st.subheader("Methodology & Tools Used")
+            tools_used = []
+            if 'external_tools' in data:
+                for tool, output in data['external_tools'].items():
+                    tools_used.append(tool)
+            st.markdown(f"**Automated Tools:** {', '.join(tools_used) if tools_used else 'Built-in scanner only'}")
+            st.markdown("- Crawled the target, analyzed forms, headers, and URLs.")
+            st.markdown("- Ran vulnerability checks for XSS, SQL Injection, Security Headers, and more.")
+            if tools_used:
+                st.markdown("- Ran external tools (see appendix for output).")
+            st.markdown("---")
+            # Findings
+            st.subheader("Findings")
             vulnerabilities = data.get('vulnerabilities', [])
             if vulnerabilities:
-                # Add filter by severity
-                severity_filter = st.multiselect(
-                    "Filter by Severity",
-                    ["Critical", "High", "Medium", "Low", "Info"],
-                    default=["Critical", "High", "Medium"]
-                )
-                
-                # Filter vulnerabilities based on severity
-                filtered_vulns = [v for v in vulnerabilities if v.get('severity', '') in severity_filter]
-                
-                if filtered_vulns:
-                    for i, vuln in enumerate(filtered_vulns):
-                        with st.expander(f"{i+1}. {vuln.get('name', 'Unknown')} ({vuln.get('severity', 'Unknown')})"):
-                            st.markdown(f"**Severity:** {vuln.get('severity', 'Unknown')}")
-                            st.markdown(f"**Description:** {vuln.get('description', 'No description available')}")
-                            st.markdown(f"**URL:** {vuln.get('url', 'N/A')}")
-                            
-                            if 'evidence' in vuln and vuln['evidence']:
-                                st.markdown("**Evidence:**")
-                                st.code(vuln['evidence'], language="text")
-                            
-                            if 'remediation' in vuln and vuln['remediation']:
-                                st.markdown("**Remediation:**")
-                                st.markdown(vuln['remediation'])
-                else:
-                    st.info("No vulnerabilities match the current filter settings.")
+                for i, vuln in enumerate(vulnerabilities):
+                    with st.expander(f"{i+1}. {vuln.get('title', vuln.get('name', 'Unknown'))} ({vuln.get('severity', 'Unknown')})", expanded=True):
+                        st.markdown(f"**Type:** {vuln.get('type', 'N/A')}")
+                        st.markdown(f"**Severity:** {vuln.get('severity', 'Unknown')}")
+                        st.markdown(f"**Description:** {vuln.get('description', 'No description available')}")
+                        st.markdown(f"**URL:** {vuln.get('url', 'N/A')}")
+                        # What we tried
+                        st.markdown("**What We Tried:**")
+                        tried = []
+                        if 'external_tools' in data:
+                            for tool in tools_used:
+                                tried.append(f"Ran {tool}")
+                        tried.append("Crawled site, analyzed forms and headers")
+                        st.markdown("<ul>" + ''.join([f"<li>{t}</li>" for t in tried]) + "</ul>", unsafe_allow_html=True)
+                        # What we found
+                        st.markdown("**What We Found:**")
+                        st.markdown(f"{vuln.get('title', vuln.get('name', 'Unknown'))} at {vuln.get('url', 'N/A')}")
+                        # Evidence/Answer
+                        if 'evidence' in vuln and vuln['evidence']:
+                            st.markdown("**Evidence/Answer:**")
+                            st.code(vuln['evidence'], language="text")
+                        if 'payload' in vuln and vuln['payload']:
+                            st.markdown(f"**Payload:** {vuln['payload']}")
+                        if 'remediation' in vuln and vuln['remediation']:
+                            st.markdown("**Remediation:**")
+                            st.markdown(vuln['remediation'])
             else:
                 st.info("No vulnerabilities were detected during the scan.")
-            
-            # Download options
-            st.markdown("---")
-            st.subheader("Download Report")
-            
-            # Options for report format
-            report_format = st.radio(
-                "Select Report Format",
-                ["JSON", "HTML"],
-                horizontal=True
-            )
-            
-            if report_format == "JSON":
-                with open(st.session_state.report_path, "r") as f:
-                    report_data = f.read()
-                    
-                st.download_button(
-                    label="Download JSON Report",
-                    data=report_data,
-                    file_name=f"security_scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                    mime="application/json"
-                )
-            else:
-                st.info("HTML report generation is coming soon. Please use JSON format for now.")
-        else:
-            # Message when no scan has been run
-            st.info("No scan results available. Run a security scan first to generate a report.")
+            # Appendix
+            if 'external_tools' in data:
+                st.markdown("---")
+                st.subheader("Appendix: External Tools Output")
+                for tool, output in data["external_tools"].items():
+                    with st.expander(f"{tool} Output"):
+                        if isinstance(output, (list, dict)):
+                            st.json(output)
+                        else:
+                            st.code(str(output))
+            with st.expander("Show Raw Results JSON"):
+                st.json(data)
 
 # AI Agent Tab
 with tabs[3]:
@@ -1423,122 +954,59 @@ with tabs[4]:
             st.markdown("### DNS Security Analysis")
             st.markdown("Analyze DNS records for security issues such as zone transfers, misconfigured records, and SPF/DMARC settings.")
             
-            dns_target = st.text_input("Target Domain", placeholder="example.com", key="dns_target")
+            dns_target = st.text_input("Target Domain", placeholder="", key="dns_target", help="Root domain e.g. example.com")
             dns_options = st.multiselect("Analysis Options", 
                                        ["DNS Records", "DNSEC Validation", "SPF/DMARC Check", "Zone Transfer Test"],
                                        default=["DNS Records", "SPF/DMARC Check"])
             
             if st.button("Run DNS Analysis", key="dns_analysis_btn"):
-                with st.spinner("Running DNS security analysis..."):
-                    # Simulate DNS analysis
-                    time.sleep(2)
-                    
-                    # Show sample results
-                    st.success("DNS Analysis completed!")
-                    
-                    # Display results
-                    dns_results = {
-                        "dns_records": {
-                            "A": ["93.184.216.34"],
-                            "MX": ["0 example-com.mail.protection.outlook.com"],
-                            "TXT": [
-                                "v=spf1 include:spf.protection.outlook.com -all",
-                                "MS=ms12345678",
-                                "v=DMARC1; p=reject; rua=mailto:admin@example.com; ruf=mailto:admin@example.com; fo=1"
-                            ],
-                            "NS": ["ns1.example.com", "ns2.example.com"]
-                        },
-                        "spf_check": "PASS - SPF record properly configured with hard fail (-all)",
-                        "dmarc_check": "PASS - DMARC record properly configured with reject policy",
-                        "zone_transfer": "PROTECTED - Zone transfer not allowed",
-                        "dnssec": "WARNING - DNSSEC not enabled"
-                    }
-                    
-                    # Format and display results
-                    st.markdown("#### DNS Records")
-                    for record_type, values in dns_results["dns_records"].items():
-                        st.markdown(f"**{record_type}**:")
-                        for value in values:
-                            st.markdown(f"- `{value}`")
-                    
-                    st.markdown("#### Security Checks")
-                    
-                    if "PASS" in dns_results["spf_check"]:
-                        st.markdown(f"✅ **SPF**: {dns_results['spf_check']}")
-                    else:
-                        st.markdown(f"❌ **SPF**: {dns_results['spf_check']}")
-                        
-                    if "PASS" in dns_results["dmarc_check"]:
-                        st.markdown(f"✅ **DMARC**: {dns_results['dmarc_check']}")
-                    else:
-                        st.markdown(f"❌ **DMARC**: {dns_results['dmarc_check']}")
-                    
-                    if "PROTECTED" in dns_results["zone_transfer"]:
-                        st.markdown(f"✅ **Zone Transfer**: {dns_results['zone_transfer']}")
-                    else:
-                        st.markdown(f"❌ **Zone Transfer**: {dns_results['zone_transfer']}")
-                        
-                    if "WARNING" in dns_results["dnssec"]:
-                        st.markdown(f"⚠️ **DNSSEC**: {dns_results['dnssec']}")
-                    else:
-                        st.markdown(f"✅ **DNSSEC**: {dns_results['dnssec']}")
+                if not dns_target:
+                    st.error("Please enter a domain to analyze.")
+                else:
+                    with st.spinner("Running DNS security analysis..."):
+                        dns_results = analyze_dns(dns_target.strip(), dns_options)
+                        st.success("DNS Analysis completed!")
         
         # SSL/TLS Scanner
         with st.expander("🔒 SSL/TLS Security Scanner"):
             st.markdown("### SSL/TLS Security Scanner")
             st.markdown("Analyze SSL/TLS configuration for security issues, cipher strength, protocol support, and certificate validation.")
             
-            ssl_target = st.text_input("Target Host", placeholder="example.com", key="ssl_target")
+            ssl_target = st.text_input("Target Host", placeholder="", key="ssl_target", help="Hostname or IP e.g. mysite.com")
             ssl_port = st.number_input("Port", min_value=1, max_value=65535, value=443, key="ssl_port")
             
             if st.button("Run SSL/TLS Scan", key="ssl_scan_btn"):
-                with st.spinner("Analyzing SSL/TLS configuration..."):
-                    # Simulate SSL/TLS scan
-                    time.sleep(2)
-                    
-                    # Show sample results
-                    st.success("SSL/TLS Analysis completed!")
-                    
-                    # Display certificate info
-                    st.markdown("#### Certificate Information")
-                    cert_info = {
-                        "subject": "CN=example.com, O=Example Inc, L=San Francisco, ST=California, C=US",
-                        "issuer": "CN=DigiCert TLS RSA SHA256 2020 CA1, O=DigiCert Inc, C=US",
-                        "valid_from": "2023-02-15",
-                        "valid_to": "2024-03-15",
-                        "sans": ["example.com", "www.example.com", "api.example.com"],
-                        "signature_algorithm": "sha256WithRSAEncryption",
-                        "key_size": "2048 bits"
-                    }
-                    
-                    for key, value in cert_info.items():
-                        if key == "sans":
-                            st.markdown(f"**Subject Alternative Names**: {', '.join(value)}")
-                        else:
-                            st.markdown(f"**{key.replace('_', ' ').title()}**: {value}")
-                    
-                    # Display supported protocols
-                    st.markdown("#### Supported Protocols")
-                    protocols = {
-                        "TLS 1.3": "✅ Supported",
-                        "TLS 1.2": "✅ Supported",
-                        "TLS 1.1": "❌ Not Supported (Good)",
-                        "TLS 1.0": "❌ Not Supported (Good)",
-                        "SSL 3.0": "❌ Not Supported (Good)",
-                        "SSL 2.0": "❌ Not Supported (Good)"
-                    }
-                    
-                    for protocol, status in protocols.items():
-                        st.markdown(f"**{protocol}**: {status}")
-                    
-                    # Display cipher strength
-                    st.markdown("#### Cipher Strength")
-                    st.markdown("✅ **Strong Ciphers Only**: All supported ciphers use strong encryption (AES-128/256)")
-                    st.markdown("✅ **Perfect Forward Secrecy**: Supported with ECDHE key exchange")
-                    
-                    # Overall rating
-                    st.markdown("#### Overall Rating")
-                    st.markdown("**A+** - Excellent SSL/TLS configuration with modern protocols and strong ciphers")
+                if not ssl_target:
+                    st.error("Please enter a target host for SSL/TLS scanning.")
+                else:
+                    with st.spinner("Analyzing SSL/TLS configuration..."):
+                        try:
+                            ssl_results = analyze_ssl_tls(ssl_target.strip(), int(ssl_port))
+                            st.success("SSL/TLS Analysis completed!")
+
+                            # Certificate info
+                            st.markdown("#### Certificate Information")
+                            for k, v in ssl_results["cert"].items():
+                                if k == "sans":
+                                    st.markdown(f"**Subject Alternative Names**: {', '.join(v)}")
+                                else:
+                                    st.markdown(f"**{k.replace('_', ' ').title()}**: {v}")
+
+                            # Protocols
+                            st.markdown("#### Supported Protocols")
+                            for proto, supported in ssl_results["protocols"].items():
+                                status = "✅ Supported" if supported else "❌ Not Supported"
+                                st.markdown(f"**{proto}**: {status}")
+
+                            # Cipher strength summary
+                            st.markdown("#### Cipher Strength")
+                            st.markdown(ssl_results["cipher_summary"])
+
+                            # Overall rating
+                            st.markdown("#### Overall Rating")
+                            st.markdown(ssl_results["rating"])
+                        except Exception as e:
+                            st.error(f"Error during SSL/TLS scan: {str(e)}")
     
     with col2:
         # Port Scanner
@@ -1546,85 +1014,86 @@ with tabs[4]:
             st.markdown("### Network Port Scanner")
             st.markdown("Scan for open ports and services on the target host to identify potential security issues.")
             
-            port_target = st.text_input("Target Host", placeholder="example.com or 192.168.1.1", key="port_target")
+            port_target = st.text_input("Target Host", placeholder="", key="port_target", help="Domain or IPv4/IPv6 address")
             port_range = st.text_input("Port Range", "21-25,80,443,3306,3389,8080,8443", key="port_range")
             
             if st.button("Run Port Scan", key="port_scan_btn"):
-                with st.spinner("Scanning ports..."):
-                    # Simulate port scan
-                    time.sleep(2)
-                    
-                    # Show sample results
-                    st.success("Port scan completed!")
-                    
-                    # Display results in a table
-                    port_data = {
-                        "Port": [22, 80, 443, 8080],
-                        "Protocol": ["TCP", "TCP", "TCP", "TCP"],
-                        "State": ["Open", "Open", "Open", "Filtered"],
-                        "Service": ["SSH", "HTTP", "HTTPS", "HTTP-Proxy"],
-                        "Version": ["OpenSSH 8.2p1", "nginx 1.18.0", "nginx 1.18.0", "Unknown"]
-                    }
-                    
-                    port_df = pd.DataFrame(port_data)
-                    st.dataframe(port_df, use_container_width=True)
-                    
-                    # Security recommendations
-                    st.markdown("#### Security Recommendations")
-                    st.markdown("⚠️ **SSH (Port 22)**: Exposed to the internet. Consider restricting access or using a VPN.")
-                    st.markdown("ℹ️ **HTTP (Port 80)**: Consider redirecting to HTTPS for secure communications.")
-                    st.markdown("✅ **HTTPS (Port 443)**: Good practice for secure communications.")
-                    st.markdown("⚠️ **HTTP-Proxy (Port 8080)**: Potentially unnecessary service. Consider disabling if not required.")
+                if not port_target:
+                    st.error("Enter a host to scan.")
+                else:
+                    with st.spinner("Scanning ports..."):
+                        try:
+                            ports_to_scan = expand_port_range(port_range)
+                            scan_results = run_port_scan(port_target.strip(), ports_to_scan)
+
+                            if not scan_results:
+                                st.warning("No open ports found in the specified range.")
+                            else:
+                                st.success("Port scan completed!")
+                                port_df = pd.DataFrame(scan_results)
+                                st.dataframe(port_df, use_container_width=True)
+                        except Exception as e:
+                            st.error(f"Port scan error: {str(e)}")
         
         # Subdomain Enumeration
         with st.expander("🔍 Subdomain Enumeration"):
             st.markdown("### Subdomain Enumeration")
-            st.markdown("Discover subdomains associated with the target domain to identify potential attack surfaces.")
-            
-            sub_target = st.text_input("Target Domain", placeholder="example.com", key="sub_target")
-            
-            enum_methods = st.multiselect("Enumeration Methods", 
-                                        ["DNS Brute Force", "Certificate Transparency", "Search Engines", "OSINT"],
-                                        default=["DNS Brute Force", "Certificate Transparency"])
-            
+            sub_target = st.text_input("Target Domain", placeholder="", key="sub_target", help="Domain to enumerate subdomains for")
+            enum_methods = st.multiselect(
+                "Enumeration Methods", ["DNS Brute Force", "Certificate Transparency"],
+                default=["DNS Brute Force", "Certificate Transparency"],
+            )
             if st.button("Enumerate Subdomains", key="sub_enum_btn"):
-                with st.spinner("Enumerating subdomains..."):
-                    # Simulate subdomain enumeration
-                    time.sleep(2)
-                    
-                    # Show sample results
-                    st.success("Subdomain enumeration completed!")
-                    
-                    # Display results
-                    subdomains = [
-                        "www.example.com", 
-                        "api.example.com", 
-                        "mail.example.com", 
-                        "blog.example.com", 
-                        "dev.example.com", 
-                        "admin.example.com", 
-                        "stage.example.com",
-                        "cdn.example.com",
-                        "shop.example.com"
-                    ]
-                    
-                    # Create a DataFrame for the results
-                    sub_data = {
-                        "Subdomain": subdomains,
-                        "IP Address": ["93.184.216.34", "93.184.216.34", "93.184.216.35", 
-                                      "93.184.216.34", "93.184.216.36", "93.184.216.34",
-                                      "93.184.216.37", "93.184.216.34", "93.184.216.34"],
-                        "HTTP Status": [200, 200, None, 200, 403, 401, 200, 200, 200]
-                    }
-                    
-                    sub_df = pd.DataFrame(sub_data)
-                    st.dataframe(sub_df, use_container_width=True)
-                    
-                    # Security findings
-                    st.markdown("#### Security Findings")
-                    st.markdown("⚠️ **Development Environment**: `dev.example.com` might expose sensitive information")
-                    st.markdown("⚠️ **Admin Interface**: `admin.example.com` should not be publicly accessible")
-                    st.markdown("⚠️ **Staging Environment**: `stage.example.com` might contain pre-production code")
+                if not sub_target:
+                    st.error("Enter a target domain.")
+                else:
+                    with st.spinner("Enumerating subdomains..."):
+                        try:
+                            subs = enumerate_subdomains(sub_target.strip(), enum_methods)
+                            st.success(f"Found {len(subs)} subdomains")
+                            if subs:
+                                st.dataframe(pd.DataFrame(subs), use_container_width=True)
+                        except Exception as e:
+                            st.error(f"Enumeration error: {str(e)}")
+        
+        # Nmap Advanced Scan
+        with st.expander("🛰️ Nmap Advanced Scan"):
+            st.markdown("### Nmap Advanced Port & Service Scan")
+            nmap_target = st.text_input("Target Host", placeholder="", key="nmap_target", help="Domain or IP address for Nmap scan")
+            nmap_port_str = st.text_input("Ports (comma or range)", "22,80,443", key="nmap_ports")
+            nmap_aggr = st.checkbox("Aggressive Scan (-A)", value=False)
+
+            if st.button("Run Nmap Scan", key="nmap_scan_btn"):
+                if not nmap_target:
+                    st.error("Enter a target host.")
+                else:
+                    with st.spinner("Running Nmap scan..."):
+                        try:
+                            from agent_team_demo.nmap_tool import run_nmap_scan
+
+                            scan_ports = expand_port_range(nmap_port_str)
+                            nmap_json = run_nmap_scan(nmap_target.strip(), ports=scan_ports, aggressive=nmap_aggr)
+
+                            host_data = next(iter(nmap_json.get("scan", {}).values()), {})
+                            tcp_info = host_data.get("tcp", {})
+                            rows = [
+                                {
+                                    "Port": port,
+                                    "State": info.get("state"),
+                                    "Service": info.get("name"),
+                                    "Product": info.get("product"),
+                                    "Version": info.get("version"),
+                                }
+                                for port, info in tcp_info.items()
+                            ]
+
+                            if rows:
+                                st.success(f"Open ports found: {len(rows)}")
+                                st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                            else:
+                                st.info("No open ports detected by Nmap.")
+                        except Exception as e:
+                            st.error(f"Nmap scan error: {str(e)}")
     
     # Horizontal line for separation
     st.markdown("---")
@@ -1644,84 +1113,26 @@ with tabs[4]:
                                "Authentication Bypass", "Information Disclosure", "Denial of Service"])
     
     if st.button("Search Vulnerabilities", key="vuln_search_btn"):
-        with st.spinner("Searching vulnerability database..."):
-            # Simulate database search
-            time.sleep(1.5)
-            
-            if "log4j" in vuln_search.lower():
-                # Example Log4j results
-                st.subheader("Results for 'Apache Log4j'")
-                
-                # CVE-2021-44228 (Log4Shell)
-                with st.expander("CVE-2021-44228 (Log4Shell) - Critical", expanded=True):
-                    st.markdown("""
-                    **CVSS Score**: 10.0 (Critical)
-                    
-                    **Affected Versions**: Apache Log4j 2.0 - 2.14.1
-                    
-                    **Description**: Apache Log4j2 2.0-beta9 through 2.15.0 (excluding security releases 2.12.2, 2.12.3, and 2.3.1) JNDI features used in configuration, log messages, and parameters do not protect against attacker controlled LDAP and other JNDI related endpoints. An attacker who can control log messages or log message parameters can execute arbitrary code loaded from LDAP servers when message lookup substitution is enabled.
-                    
-                    **Exploit Status**: Actively exploited in the wild
-                    
-                    **Patch Status**: Fixed in Log4j 2.15.0 and later
-                    
-                    **Remediation**:
-                    - Update to Log4j 2.17.1 or later
-                    - If unable to update, set system property `-Dlog4j2.formatMsgNoLookups=true`
-                    - Remove JndiLookup class from the classpath: `zip -q -d log4j-core-*.jar org/apache/logging/log4j/core/lookup/JndiLookup.class`
-                    """)
-                
-                # CVE-2021-45046
-                with st.expander("CVE-2021-45046 - Critical"):
-                    st.markdown("""
-                    **CVSS Score**: 9.0 (Critical)
-                    
-                    **Affected Versions**: Apache Log4j 2.0 - 2.15.0
-                    
-                    **Description**: The fix for CVE-2021-44228 in Apache Log4j 2.15.0 was incomplete in certain non-default configurations. This could allow attackers to craft malicious input data using a JNDI Lookup pattern, resulting in a denial of service (DOS) attack or, in some environments, remote code execution.
-                    
-                    **Exploit Status**: Actively exploited in the wild
-                    
-                    **Patch Status**: Fixed in Log4j 2.16.0 and later
-                    
-                    **Remediation**:
-                    - Update to Log4j 2.17.1 or later
-                    """)
-            elif "wordpress" in vuln_search.lower():
-                # Example WordPress results
-                st.subheader("Results for 'WordPress'")
-                
-                with st.expander("CVE-2023-XXXXX - WordPress Plugin XYZ SQL Injection - High", expanded=True):
-                    st.markdown("""
-                    **CVSS Score**: 8.8 (High)
-                    
-                    **Affected Versions**: WordPress Plugin XYZ 1.2.0 - 1.3.5
-                    
-                    **Description**: The WordPress Plugin XYZ contains an unauthenticated SQL injection vulnerability that allows attackers to extract sensitive data from the database.
-                    
-                    **Exploit Status**: Proof of concept available
-                    
-                    **Patch Status**: Fixed in version 1.3.6
-                    
-                    **Remediation**:
-                    - Update the plugin to version 1.3.6 or later
-                    - If unable to update, remove the plugin until an update is available
-                    """)
-            else:
-                st.info("No specific vulnerabilities found for your search query. Try another search term or browse common vulnerabilities below.")
-                
-                # Display common vulnerabilities
-                st.markdown("### Common Web Application Vulnerabilities")
-                
-                vuln_data = {
-                    "CVE ID": ["CVE-2021-44228", "CVE-2023-23506", "CVE-2022-22965", "CVE-2022-1388"],
-                    "Name": ["Log4Shell", "OAuth XSS", "Spring4Shell", "F5 BIG-IP RCE"],
-                    "Severity": ["Critical", "High", "Critical", "Critical"],
-                    "Affected Product": ["Apache Log4j", "OAuth Client", "Spring Framework", "F5 BIG-IP"]
-                }
-                
-                vuln_df = pd.DataFrame(vuln_data)
-                st.dataframe(vuln_df, use_container_width=True)
+        if not vuln_search:
+            st.error("Please enter a search term.")
+        else:
+            with st.spinner("Searching NVD..."):
+                try:
+                    cve_results = search_nvd(vuln_search)
+                    if not cve_results:
+                        st.info("No CVEs found for your query.")
+                    else:
+                        st.subheader(f"Found {len(cve_results)} CVEs")
+                        for cve in cve_results:
+                            sev = cve.get("severity", "Unknown")
+                            with st.expander(f"{cve['id']} - {sev}"):
+                                st.markdown(f"**CVSS Score**: {cve.get('score', 'N/A')}")
+                                st.markdown(f"**Published**: {cve.get('published')}")
+                                st.markdown(f"**Last Modified**: {cve.get('modified')}")
+                                st.markdown(f"**Summary**: {cve.get('summary')}")
+                                st.markdown(f"[NVD Link](https://nvd.nist.gov/vuln/detail/{cve['id']})")
+                except Exception as e:
+                    st.error(f"Error querying NVD: {str(e)}")
 
 # --- Sidebar Navigation --- 
 # Define navigation options including the Bug Bounty Team
@@ -1734,13 +1145,30 @@ st.sidebar.markdown("---") # Add a separator
 st.sidebar.header("Navigation")
 selected_sidebar_tab = st.sidebar.radio("Select Feature", SIDEBAR_TABS)
 
-# --- Main Content Area Logic --- 
-# Display the main tabs unless the Bug Bounty Team is selected in the sidebar
-if selected_sidebar_tab == "🔍 Security Scanner":
-    # Content for the main tabs (Scanner, Results, Report, AI Agent, Tools) is handled above within the `with tabs[...]` blocks.
-    pass # The tab content is already defined above
+# Optionally, show scan status in sidebar
+if st.session_state.get("scanning", False):
+    st.sidebar.info("Scan in progress...")
+elif st.session_state.get("scan_results"):
+    st.sidebar.success("Last scan complete")
 
-elif selected_sidebar_tab == "🦾 AI Bug Bounty Team":
+# --- Custom CSS for modern look ---
+st.markdown(
+    """
+    <style>
+    .stButton>button {background-color: #1f2937; color: #fff; border-radius: 8px; border: none; padding: 0.5em 1.5em; font-weight: 600;}
+    .stButton>button:disabled {background-color: #374151; color: #888;}
+    .st-expander {border-radius: 8px; border: 1px solid #374151;}
+    .stTextInput>div>input, .stTextArea>div>textarea {background: #23272f; color: #fff; border-radius: 6px; border: 1px solid #374151;}
+    .stMultiSelect>div {background: #23272f; color: #fff; border-radius: 6px; border: 1px solid #374151;}
+    .stSlider>div {color: #fff;}
+    .stRadio>div {background: #23272f; color: #fff; border-radius: 6px; border: 1px solid #374151;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# --- Main Content Area Logic --- 
+if selected_sidebar_tab == "🦾 AI Bug Bounty Team":
     # Display the AI Bug Bounty Team UI directly in the main area, replacing the tabs
     st.header("🦾 AI Bug Bounty Hunter Team")
     st.markdown("A team of specialized AI agents for finding security vulnerabilities, CTFs, and bug bounties.")
@@ -1761,6 +1189,24 @@ elif selected_sidebar_tab == "🦾 AI Bug Bounty Team":
         
     with st.form("bb_target_form"):
         target_input = st.text_input("Enter the target website or repository to analyze:", value=st.session_state.bb_target)
+        recon_feedback_in = st.text_area(
+            "Clarifications / scope notes for Vulnerability Scanner (optional)",
+            value=st.session_state.get("bb_recon_feedback", ""),
+            key="bb_recon_feedback",
+        )
+
+        vuln_feedback_in = st.text_area(
+            "Clarifications for Exploit Tester (optional)",
+            value=st.session_state.get("bb_vuln_feedback", ""),
+            key="bb_vuln_feedback",
+        )
+
+        final_feedback_in = st.text_area(
+            "Clarifications for Report Generator (optional)",
+            value=st.session_state.get("bb_final_feedback", ""),
+            key="bb_final_feedback",
+        )
+
         submitted = st.form_submit_button("Start Analysis")
         
     if submitted and target_input:
@@ -1788,7 +1234,7 @@ elif selected_sidebar_tab == "🦾 AI Bug Bounty Team":
             with st.spinner("Running Vulnerability Scanning Phase..."):
                 # We need a way to get user feedback if desired, form resets make this tricky
                 # For now, passing empty feedback
-                user_recon_feedback = "" # Placeholder - consider adding an input outside the form later
+                user_recon_feedback = recon_feedback_in
                 st.session_state.bb_vuln_result = execute_vuln_scan_phase(st.session_state.bb_recon_result, user_recon_feedback, checklist)
                 shared_context.update('vuln_scan', st.session_state.bb_vuln_result)
         else:
@@ -1797,7 +1243,7 @@ elif selected_sidebar_tab == "🦾 AI Bug Bounty Team":
         # Step 3: Exploit Testing (if vuln scan succeeded)
         if st.session_state.bb_vuln_result and "Error:" not in st.session_state.bb_vuln_result:
              with st.spinner("Running Exploit Testing Phase..."):
-                user_vuln_feedback_exploit = "" # Placeholder
+                user_vuln_feedback_exploit = vuln_feedback_in
                 st.session_state.bb_exploit_result = execute_exploit_phase(st.session_state.bb_vuln_result, user_vuln_feedback_exploit, checklist)
                 shared_context.update('exploit', st.session_state.bb_exploit_result)
                 
@@ -1820,7 +1266,7 @@ elif selected_sidebar_tab == "🦾 AI Bug Bounty Team":
         # Step 4: Report Generation (if exploit test succeeded or was skipped gracefully)
         if st.session_state.bb_exploit_result and "Error:" not in st.session_state.bb_exploit_result:
              with st.spinner("Generating Final Report..."):
-                user_exploit_feedback_final = "" # Placeholder
+                user_exploit_feedback_final = final_feedback_in
                 st.session_state.bb_report_result = execute_report_phase(
                     st.session_state.bb_recon_result,
                     st.session_state.bb_vuln_result, 
@@ -1830,8 +1276,8 @@ elif selected_sidebar_tab == "🦾 AI Bug Bounty Team":
                 )
                 shared_context.update('report', st.session_state.bb_report_result)
         elif st.session_state.bb_vuln_result and "Error:" not in st.session_state.bb_vuln_result:
-             st.error("Exploit Testing phase failed. Cannot generate report.")
-             
+             st.error("Exploit Testing phase failed. Cannot generate report.") # Repeat error msg
+
     # --- Display Results from Session State --- 
     # Display results outside the form to persist after form submission causes rerun
     if st.session_state.bb_target:
@@ -1888,3 +1334,357 @@ st.markdown("""
     <p><small>Only scan systems you have permission to test. The authors are not responsible for misuse.</small></p>
 </div>
 """, unsafe_allow_html=True) 
+
+# ---------------- DNS ANALYSIS UTIL -----------------
+
+def analyze_dns(domain: str, options: list[str]):
+    """Perform real DNS security analysis and return structured results."""
+    res = {
+        "dns_records": {},
+        "spf_check": "Not checked",
+        "dmarc_check": "Not checked",
+        "zone_transfer": "Not tested",
+        "dnssec": "Not checked",
+    }
+
+    resolver = dns.resolver.Resolver()
+    resolver.timeout = 3
+    resolver.lifetime = 5
+
+    # Fetch standard records
+    if "DNS Records" in options:
+        for rtype in ["A", "AAAA", "MX", "TXT", "NS"]:
+            try:
+                answers = resolver.resolve(domain, rtype, raise_on_no_answer=False)
+                if answers:
+                    res["dns_records"][rtype] = [str(rdata) for rdata in answers]
+            except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.exception.DNSException):
+                pass
+
+    # SPF / DMARC checks
+    if any(opt in options for opt in ["SPF/DMARC Check"]):
+        # SPF
+        txt_records = res["dns_records"].get("TXT", [])
+        spf_record = next((t for t in txt_records if t.lower().startswith("v=spf1")), None)
+        if spf_record:
+            res["spf_check"] = (
+                "PASS - SPF record present with hard fail (-all)"
+                if "-all" in spf_record
+                else "WARNING - SPF record present but no hard fail"
+            )
+        else:
+            res["spf_check"] = "FAIL - SPF record missing"
+
+        # DMARC
+        try:
+            dmarc_domain = f"_dmarc.{domain}"
+            dmarc_ans = resolver.resolve(dmarc_domain, "TXT", raise_on_no_answer=False)
+            dmarc_txt = " ".join(str(r) for r in dmarc_ans) if dmarc_ans else ""
+            if dmarc_txt:
+                res["dmarc_check"] = (
+                    "PASS - Reject/Quarantine policy present"
+                    if "p=reject" in dmarc_txt or "p=quarantine" in dmarc_txt
+                    else "WARNING - DMARC present but not strict"
+                )
+            else:
+                res["dmarc_check"] = "FAIL - DMARC record missing"
+        except dns.exception.DNSException:
+            res["dmarc_check"] = "ERROR - Could not query DMARC"
+
+    # DNSSEC detection (simple): look for DS record at parent zone
+    if "DNSEC Validation" in options:
+        try:
+            ds_ans = resolver.resolve(domain, "DS", raise_on_no_answer=False)
+            res["dnssec"] = "ENABLED" if ds_ans else "NOT ENABLED"
+        except dns.exception.DNSException:
+            res["dnssec"] = "ERROR - Unable to determine DNSSEC status"
+
+    # Zone transfer test
+    if "Zone Transfer Test" in options:
+        ns_records = res["dns_records"].get("NS", [])
+        protected = True
+        for ns in ns_records:
+            nshost = str(ns).rstrip('.')
+            try:
+                zone = dns.zone.from_xfr(dns.query.xfr(nshost, domain, timeout=5))
+                # If we get here, zone transfer succeeded
+                protected = False
+                break
+            except Exception:
+                continue
+        res["zone_transfer"] = "PROTECTED - Zone transfer not allowed" if protected else "VULNERABLE - Zone transfer succeeded"
+
+    return res
+
+# ---------------- SSL/TLS ANALYSIS UTIL -----------------
+
+def analyze_ssl_tls(host: str, port: int = 443):
+    """Connects to host:port, fetches certificate, and enumerates protocol support."""
+    result = {
+        "cert": {},
+        "protocols": {},
+        "cipher_summary": "",
+        "rating": "",
+    }
+
+    # Helper to test protocol support
+    def _supports(version: ssl.TLSVersion):
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.minimum_version = version
+        ctx.maximum_version = version
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        try:
+            with socket.create_connection((host, port), timeout=5) as sock:
+                with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                    return True
+        except ssl.SSLError:
+            return False
+        except Exception:
+            return False
+
+    # Certificate retrieval (TLS1.2 context)
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with socket.create_connection((host, port), timeout=5) as sock:
+        with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+            cert = ssock.getpeercert()
+            cipher = ssock.cipher()
+
+    # Populate cert info
+    result["cert"] = {
+        "subject": ", ".join("=".join(t) for t in cert.get("subject", [[("")]])[0]),
+        "issuer": ", ".join("=".join(t) for t in cert.get("issuer", [[("")]])[0]),
+        "valid_from": cert.get("notBefore"),
+        "valid_to": cert.get("notAfter"),
+        "sans": [e[1] for e in cert.get("subjectAltName", []) if e[0] == "DNS"],
+        "signature_algorithm": cert.get("signatureAlgorithm", "Unknown"),
+        "key_size": f"{cert.get('subjectPublicKeyInfo', {}).get('RSA', {}).get('key_size', 'Unknown')} bits",
+    }
+
+    # Protocols check
+    for version_label, version in [
+        ("TLS 1.3", ssl.TLSVersion.TLSv1_3),
+        ("TLS 1.2", ssl.TLSVersion.TLSv1_2),
+        ("TLS 1.1", ssl.TLSVersion.TLSv1_1),
+        ("TLS 1.0", ssl.TLSVersion.TLSv1),
+    ]:
+        result["protocols"][version_label] = _supports(version)
+
+    # Simple cipher assessment
+    cipher_name, protocol, bits = cipher
+    if bits and bits >= 128:
+        result["cipher_summary"] = f"✅ Strong cipher negotiated: {cipher_name} ({bits} bits)"
+    else:
+        result["cipher_summary"] = f"⚠️ Weak cipher negotiated: {cipher_name} ({bits} bits)"
+
+    # Rating heuristics
+    if result["protocols"].get("TLS 1.3") and not result["protocols"].get("TLS 1.0"):
+        result["rating"] = "**A** - Modern protocols, strong cipher"
+    else:
+        result["rating"] = "**B** - Improve protocol/cipher configuration"
+
+    return result
+
+# ---------------- NVD SEARCH UTIL -----------------
+
+def search_nvd(keyword: str, max_results: int = 20):
+    """Query NVD API v2 for keyword and return simplified CVE list."""
+    import urllib.parse
+    base = "https://services.nvd.nist.gov/rest/json/v2/cves/1.0"  # legacy path fallback
+    # New 2.0 endpoint
+    base2 = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+    params = {
+        "keywordSearch": keyword,
+        "resultsPerPage": max_results,
+    }
+
+    url = f"{base2}?{urllib.parse.urlencode(params)}"
+    r = requests.get(url, timeout=15)
+    if r.status_code != 200:
+        raise RuntimeError(f"NVD API error {r.status_code}")
+
+    data = r.json()
+    vulns = data.get("vulnerabilities", [])
+    results = []
+    for v in vulns:
+        cve = v.get("cve", {})
+        cve_id = cve.get("id")
+        summary = next((d["value"] for d in cve.get("descriptions", []) if d["lang"] == "en"), "")
+        published = cve.get("published")
+        modified = cve.get("lastModified")
+        metrics = cve.get("metrics", {})
+        severity = "Unknown"
+        score = None
+        for key in ("cvssMetricV31", "cvssMetricV30"):
+            if key in metrics:
+                cvss = metrics[key][0].get("cvssData", {})
+                severity = metrics[key][0].get("baseSeverity", "Unknown")
+                score = cvss.get("baseScore")
+                break
+        results.append({
+            "id": cve_id,
+            "summary": summary,
+            "published": published,
+            "modified": modified,
+            "severity": severity,
+            "score": score,
+        })
+    return results
+
+# ---------------------------------------------------------------------------
+# Backward‑compatibility wrapper for old tests & modules
+# ---------------------------------------------------------------------------
+
+def run_embedded_scan(url: str, depth: int = 2, scan_options=None, timeout_value: int = 10, progress_callback=None):
+    """Legacy function kept for compatibility. Internally delegates to `scan_website`.
+
+    Args:
+        url (str): Target URL.
+        depth (int): Crawl depth (maps to scan_depth).
+        scan_options (list[str] | None): Vulnerability tests to run.
+        timeout_value (int): Request timeout.
+        progress_callback (callable | None): Progress logger accepting (str).
+    """
+    if scan_options is None:
+        scan_options = ["XSS", "SQL Injection", "Security Headers"]
+    # Use default threads (3) to keep quick
+    res = scan_website(
+        url,
+        scan_depth=depth,
+        scan_options=scan_options,
+        threads=3,
+        timeout=timeout_value,
+        callback=progress_callback,
+    )
+    # Inject flat keys for legacy callers
+    stats = res.get("stats", {})
+    if "urls_scanned" not in res:
+        res["urls_scanned"] = stats.get("urls_scanned", 0)
+    if "forms_analyzed" not in res:
+        res["forms_analyzed"] = stats.get("forms_analyzed", 0)
+    return res
+
+# ---------------- CODE COACH UTIL -----------------
+
+def analyze_code_snippet(code: str):
+    """Very lightweight static checks for risky Python patterns.
+
+    Returns list of (severity, message) tuples.
+    """
+    import ast, re
+
+    issues: list[tuple[str, str]] = []
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        return [("critical", f"Syntax error: {e.msg} at line {e.lineno}")]
+
+    class Visitor(ast.NodeVisitor):
+        def visit_Call(self, node: ast.Call):
+            # eval / exec
+            if isinstance(node.func, ast.Name) and node.func.id in {"eval", "exec"}:
+                issues.append(("high", f"Use of {node.func.id}() detected at line {node.lineno}"))
+            # subprocess with shell=True
+            elif (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"Popen", "call", "run"}
+            ):
+                for kw in node.keywords:
+                    if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
+                        issues.append(("high", f"subprocess.{node.func.attr}(shell=True) at line {node.lineno}"))
+            self.generic_visit(node)
+
+        def visit_ExceptHandler(self, node: ast.ExceptHandler):
+            if node.type is None:
+                issues.append(("medium", f"Bare except detected at line {node.lineno}"))
+            self.generic_visit(node)
+
+    Visitor().visit(tree)
+
+    # Hard‑coded secrets regexes (simple)
+    secret_patterns = [
+        r"AKIA[0-9A-Z]{16}",  # AWS key
+        r"AIza[0-9A-Za-z\-_]{35}",  # Google API
+        r"sk_live_[0-9a-zA-Z]{24}",  # Stripe Live
+    ]
+    for pat in secret_patterns:
+        for m in re.finditer(pat, code):
+            issues.append(("critical", f"Possible credential matched '{pat}' at pos {m.start()}"))
+
+    return issues
+
+# ------------------ CODE COACH TAB ------------------
+
+with tabs[4]:
+    st.markdown("### 🛡️ Code Coach – Instant Secure‑Coding Feedback")
+
+    snippet = st.text_area("Paste Python code to analyze", height=200, key="code_coach_input")
+
+    if st.button("Analyze Snippet", key="code_coach_btn"):
+        if not snippet.strip():
+            st.error("Please paste some Python code first.")
+        else:
+            issues = analyze_code_snippet(snippet)
+            if not issues:
+                st.success("✅ No obvious issues detected. Great job!")
+            else:
+                sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+                issues.sort(key=lambda t: sev_order.get(t[0], 4))
+                for sev, msg in issues:
+                    color = {
+                        "critical": "#f38ba8",
+                        "high": "#fab387",
+                        "medium": "#f9e2af",
+                        "low": "#a6e3a1",
+                    }.get(sev, "#cdd6f4")
+                    st.markdown(f"<div style='border-left:6px solid {color};padding:8px;margin:6px 0;'>"
+                                f"<strong>{sev.title()}:</strong> {msg}</div>", unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown("#### 📦 Dependency Risk Scanner (requirements.txt)")
+
+    req_text = st.text_area("Paste requirements.txt content", height=120, key="dep_scan_input")
+
+    if st.button("Analyze Dependencies", key="dep_scan_btn"):
+        pkgs = []
+        for line in req_text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # simple split on == or >= etc.
+            import re as _re
+            m = _re.match(r"([a-zA-Z0-9_\-]+)", line)
+            if m:
+                pkgs.append(m.group(1).lower())
+
+        if not pkgs:
+            st.error("No packages detected.")
+        else:
+            with st.spinner("Querying OSV database..."):
+                import requests, json as _json
+                vulns_found = []
+                try:
+                    # OSV bulk API
+                    url = "https://api.osv.dev/v1/querybatch"
+                    body = {"queries": [{"package": {"name": p, "ecosystem": "PyPI"}} for p in pkgs]}
+                    r = requests.post(url, json=body, timeout=15)
+                    data = r.json()
+                    for pkg, result in zip(pkgs, data.get("results", [])):
+                        for vuln in result.get("vulns", []):
+                            vulns_found.append({
+                                "package": pkg,
+                                "id": vuln.get("id"),
+                                "summary": vuln.get("summary", "")[:120],
+                            })
+                except Exception as e:
+                    st.error(f"Error querying OSV: {e}")
+                    vulns_found = []
+
+            if not vulns_found:
+                st.success("✅ No known vulnerabilities in listed packages!")
+            else:
+                st.error(f"Found {len(vulns_found)} vulnerable packages:")
+                
