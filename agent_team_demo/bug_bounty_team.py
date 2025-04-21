@@ -14,6 +14,9 @@ import socket
 from textwrap import dedent
 from pathlib import Path
 import openai # Use the direct OpenAI library
+# Additional imports for real scanning
+import urllib3
+from bs4 import BeautifulSoup
 
 # Check for OpenAI API key
 if not os.getenv("OPENAI_API_KEY"):
@@ -103,13 +106,13 @@ def http_request(url, method='GET', data=None, headers=None, timeout=5):
         else:
             resp = requests.post(url, data=data, headers=headers, timeout=timeout, verify=False)
         # Return a dictionary that can be easily printed or used
-        return {{
+        return {
             'status_code': resp.status_code,
             'headers': dict(resp.headers),
             'body': resp.text[:1000]
-        }}
+        }
     except Exception as e:
-        return {{'error': str(e)}}
+        return {'error': str(e)}
 
 def port_scan(host, ports=[80, 443, 8080, 22, 21, 3306, 5432], timeout=1):
     '''Scan a list of ports on a host and return open ports.'''
@@ -117,7 +120,7 @@ def port_scan(host, ports=[80, 443, 8080, 22, 21, 3306, 5432], timeout=1):
     try:
         ip_address = socket.gethostbyname(host)
     except socket.gaierror:
-        return {{'error': f"Could not resolve hostname: {{host}}"}}
+        return {'error': f"Could not resolve hostname: {host}"}
         
     for port in ports:
         try:
@@ -126,7 +129,7 @@ def port_scan(host, ports=[80, 443, 8080, 22, 21, 3306, 5432], timeout=1):
                 open_ports.append(port)
         except Exception:
             continue # Port is likely closed or filtered
-    return {{'open_ports': open_ports}}
+    return {'open_ports': open_ports}
 
 def dir_bruteforce(url, wordlist=['admin', 'login', 'dashboard', 'test', 'backup', 'wp-admin', 'api'], timeout=3):
     '''Brute-force common directories on a web server.'''
@@ -140,10 +143,10 @@ def dir_bruteforce(url, wordlist=['admin', 'login', 'dashboard', 'test', 'backup
             # Use verify=False for simplicity, HEAD request might be faster
             resp = requests.get(test_url, timeout=timeout, allow_redirects=False, verify=False)
             if resp.status_code < 400:
-                found.append({{'url': test_url, 'status': resp.status_code}})
+                found.append({'url': test_url, 'status': resp.status_code})
         except requests.exceptions.RequestException:
             continue # Ignore connection errors, timeouts etc.
-    return {{'found': found}}
+    return {'found': found}
 
 # --- End Helper Function Injection ---
 
@@ -153,82 +156,46 @@ def dir_bruteforce(url, wordlist=['admin', 'login', 'dashboard', 'test', 'backup
     # Prepend helper code to the user's snippet
     full_code = helper_code + "\n" + code_snippet
     
-    tmp_path = None # Initialize tmp_path
+    tmp_dir = None
     try:
-        # Use 'utf-8' encoding for broader compatibility
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as tmp:
-            tmp.write(full_code)
-            tmp_path = tmp.name
-        
-        # Execute the combined script
+        # Create an isolated temp directory for execution
+        tmp_dir = tempfile.mkdtemp(prefix="poc_")
+        tmp_path = os.path.join(tmp_dir, "poc.py")
+
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            fh.write(full_code)
+
+        # Minimal, deterministic environment – no user secrets
+        safe_env = {"PYTHONIOENCODING": "utf-8", "PATH": os.getenv("PATH", "")}
+
+        # Windows: hide console window to avoid flashing
+        creation_flags = 0
+        if hasattr(subprocess, "CREATE_NO_WINDOW"):
+            creation_flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+
+        # Execute with isolated mode (-I) to ignore PYTHONPATH & site‑packages; 15‑second hard timeout
         result = subprocess.run(
-            [sys.executable, tmp_path],
+            [sys.executable, "-I", tmp_path],
+            cwd=tmp_dir,
+            env=safe_env,
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=15,
+            creationflags=creation_flags,
         )
-        # Clean up the temp file
-        os.unlink(tmp_path)
+
         output = result.stdout.strip()
         error = result.stderr.strip()
-        return {'output': output, 'error': error}
+        return {"output": output, "error": error}
+    except subprocess.TimeoutExpired as te:
+        return {"output": te.stdout or "", "error": "Execution timed out"}
     except Exception as e:
-        # Ensure cleanup even on error
-        if 'tmp_path' in locals() and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        return {'output': '', 'error': str(e)}
-
-def http_request(url, method='GET', data=None, headers=None, timeout=5):
-    # ... (Keep http_request function as is) ...
-    """Perform an HTTP GET or POST request and return status, headers, and body."""
-    try:
-        if method.upper() == 'GET':
-            resp = requests.get(url, headers=headers, timeout=timeout, verify=False) # Added verify=False for simplicity, consider security implications
-        else:
-            resp = requests.post(url, data=data, headers=headers, timeout=timeout, verify=False)
-        return {
-            'status_code': resp.status_code,
-            'headers': dict(resp.headers),
-            'body': resp.text[:1000]  # limit output
-        }
-    except Exception as e:
-        return {'error': str(e)}
-
-def port_scan(host, ports=[80, 443, 8080, 22, 21, 3306, 5432], timeout=1):
-    # ... (Keep port_scan function as is) ...
-    """Scan a list of ports on a host and return open ports."""
-    open_ports = []
-    # Resolve hostname to IP if needed
-    try:
-        ip_address = socket.gethostbyname(host)
-    except socket.gaierror:
-        return {'error': f"Could not resolve hostname: {host}"}
-        
-    for port in ports:
-        try:
-            with socket.create_connection((ip_address, port), timeout=timeout):
-                open_ports.append(port)
-        except Exception:
-            continue
-    return {'open_ports': open_ports}
-
-def dir_bruteforce(url, wordlist=['admin', 'login', 'dashboard', 'test', 'backup', 'wp-admin', 'api'], timeout=3):
-    # ... (Keep dir_bruteforce function as is) ...
-     """Brute-force common directories on a web server."""
-     found = []
-     if not url.startswith(("http://", "https://")):
-         url = "http://" + url # Assume http if not specified
-
-     for word in wordlist:
-         # Ensure forward slashes and no double slashes
-         test_url = url.rstrip('/') + '/' + word.lstrip('/')
-         try:
-             resp = requests.get(test_url, timeout=timeout, allow_redirects=False, verify=False)
-             if resp.status_code < 400: # Success or redirect
-                 found.append({'url': test_url, 'status': resp.status_code})
-         except requests.exceptions.RequestException:
-             continue
-     return {'found': found}
+        return {"output": "", "error": str(e)}
+    finally:
+        # Clean up directory
+        if tmp_dir and os.path.isdir(tmp_dir):
+            import shutil
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 # --- Agent Phase Execution Functions ---
 
@@ -296,7 +263,71 @@ Always check these resources for relevant vulnerabilities and techniques.
 After completing your findings, write a short paragraph reflecting on the thoroughness and reliability of your reconnaissance. Mention any uncertainties or areas for further investigation.
 """)
 def execute_recon_phase(user_query):
-    return call_openai_api(RECON_SYSTEM_PROMPT, user_query)
+    """Perform lightweight real reconnaissance: server headers & TLS info."""
+    import re, requests, ssl
+    from urllib.parse import urlparse
+
+    # Extract URL
+    match = re.search(r"https?://[\w./:-]+", user_query)
+    if not match:
+        return "Error: No valid URL found in input."
+
+    url = match.group(0)
+    parsed = urlparse(url)
+    domain = parsed.netloc
+
+    findings = [f"Target URL: {url}"]
+
+    # Fetch headers
+    try:
+        resp = requests.get(url, timeout=10, verify=False)
+        server = resp.headers.get("Server", "Not disclosed")
+        findings.append(f"Server header: {server}")
+
+        # Missing security headers
+        for header in ["Strict-Transport-Security", "Content-Security-Policy", "X-Frame-Options"]:
+            if header not in resp.headers:
+                findings.append(f"Missing security header: {header}")
+    except Exception as e:
+        findings.append(f"Error fetching URL: {e}")
+
+    # Simple TLS cert info
+    try:
+        import ssl, socket as sk
+        ctx = ssl.create_default_context()
+        with ctx.wrap_socket(sk.socket(), server_hostname=domain) as s:
+            s.settimeout(5)
+            s.connect((domain, 443))
+            cert = s.getpeercert()
+            findings.append(f"TLS issuer: {cert.get('issuer')[0][0][1]}")
+    except Exception as e:
+        findings.append(f"TLS check error: {e}")
+
+    # --- Additional enumeration using external CLI tools if available ---
+    try:
+        from agent_team_demo.external_tools import (
+            tool_exists,
+            subfinder_enum,
+            dnsx_lookup,
+        )
+
+        if tool_exists("subfinder"):
+            try:
+                subs = subfinder_enum(domain)
+                findings.append(f"Subfinder discovered {len(subs)} subdomains")
+            except Exception as se:
+                findings.append(f"Subfinder error: {se}")
+
+        if tool_exists("dnsx"):
+            try:
+                a_records = dnsx_lookup(domain, "A")
+                findings.append(f"dnsx A records: {', '.join(a_records[:5])}{' ...' if len(a_records)>5 else ''}")
+            except Exception as de:
+                findings.append(f"dnsx error: {de}")
+    except ImportError:
+        pass
+
+    return "\n".join(findings)
 
 # -- Vulnerability Scanning Phase --
 VULN_SCANNER_SYSTEM_PROMPT = dedent(f"""
@@ -330,8 +361,97 @@ Reference Resources:
 After listing vulnerabilities, reflect on the confidence of your findings, potential false positives, and areas needing exploit testing.
 """)
 def execute_vuln_scan_phase(recon_data, user_feedback, checklist):
-    user_prompt = f"Reconnaissance Findings:\n{recon_data}\n\nUser Feedback/Clarifications:\n{user_feedback}\n\nVulnerability Checklist to Address:\n{checklist}\n\nPerform vulnerability analysis based on the above."
-    return call_openai_api(VULN_SCANNER_SYSTEM_PROMPT, user_prompt)
+    """Run embedded scanner for real basic results."""
+    import re
+
+    url_match = re.search(r"https?://[\w./:-]+", recon_data)
+    if not url_match:
+        return "Error: Could not determine target URL."
+
+    url = url_match.group(0)
+
+    # Attempt to import the Streamlit dashboard **only if it hasn't already been executed**.
+    # When the dashboard is launched with `streamlit run`, the module name becomes `__main__`,
+    # so a normal `import agent_team_demo.security_dashboard` will re‑execute the script and
+    # fail (Streamlit only allows `st.set_page_config` once per session, etc.).
+    try:
+        import sys
+        from importlib import import_module
+
+        scan_func = None
+        # Try to get run_embedded_scan from dashboard if available
+        if "agent_team_demo.security_dashboard" in sys.modules:
+            sd = sys.modules["agent_team_demo.security_dashboard"]
+            scan_func = getattr(sd, "run_embedded_scan", None)
+        elif "__main__" in sys.modules and hasattr(sys.modules["__main__"], "run_embedded_scan"):
+            sd = sys.modules["__main__"]
+            scan_func = getattr(sd, "run_embedded_scan", None)
+        else:
+            try:
+                sd = import_module("agent_team_demo.security_dashboard")
+                scan_func = getattr(sd, "run_embedded_scan", None)
+            except Exception:
+                scan_func = None
+        # Fallback: always use scan_website from security_scanner.py if not found
+        if scan_func is None:
+            from agent_team_demo.security_scanner import scan_website as scan_func
+
+    except Exception as _e:
+        # Log for debugging without breaking user flow
+        print(f"[execute_vuln_scan_phase] Import failure: {_e}")
+        scan_func = None
+
+    if not scan_func:
+        return "Error: Scanner function unavailable."
+
+    def _cb(v, m=None):
+        pass  # silent progress
+
+    results = scan_func(
+        url,
+        scan_depth=1,
+        scan_options=["XSS", "SQL Injection", "Security Headers"],
+        threads=3,
+        timeout=10,
+        callback=_cb,
+    )
+
+    stats = results.get('stats', {})
+    summary_lines = [
+        f"URLs scanned: {stats.get('urls_scanned', 0)}",
+        f"Forms analyzed: {stats.get('forms_analyzed', 0)}",
+    ]
+    for v in results["vulnerabilities"]:
+        summary_lines.append(f"{v.get('severity', 'Unknown')} - {v.get('title', v.get('name', 'Unknown'))} at {v.get('url', 'Unknown')}")
+
+    # --- EXTRA: invoke external CLI scanners if available for *real* deep scan ---
+    try:
+        from agent_team_demo.external_tools import tool_exists, katana_scan, nuclei_scan
+
+        # Katana crawler – gather additional URLs
+        if tool_exists("katana"):
+            try:
+                kat_urls = katana_scan(url, depth=2, threads=5)
+                summary_lines.append(f"Katana discovered {len(kat_urls)} additional URLs")
+            except Exception as e:
+                summary_lines.append(f"Katana error: {e}")
+
+        # Nuclei quick vuln scan (low severity filter to keep it fast)
+        if tool_exists("nuclei"):
+            try:
+                nuclei_out = nuclei_scan(url, severity="low,medium,high,critical")
+                # show only first 5 findings to keep summary short
+                nuclei_lines = nuclei_out.splitlines()
+                shown = nuclei_lines[:5]
+                more = len(nuclei_lines) - len(shown)
+                summary_lines.append("Nuclei findings:\n" + "\n".join(shown) + (f"\n...and {more} more" if more > 0 else ""))
+            except Exception as e:
+                summary_lines.append(f"Nuclei error: {e}")
+    except ImportError:
+        # external_tools module missing; ignore
+        pass
+
+    return "\n".join(summary_lines)
 
 # -- Exploit Testing Phase --
 EXPLOIT_TESTER_SYSTEM_PROMPT = dedent(f"""
