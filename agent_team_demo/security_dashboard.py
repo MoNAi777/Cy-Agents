@@ -434,7 +434,7 @@ def scan_website_security(url: str, scan_depth: int = 2):
     st.session_state.scanning = True
     
     # Run scan
-    run_scan(url, scan_depth)
+    run_security_scan()
     
     # Return results as JSON
     return json.dumps(st.session_state.scan_results)
@@ -581,8 +581,8 @@ def run_security_scan():
     current_target_url = ""
     
     # Check if target_url is in locals (from sidebar)
-    if 'target_url' in locals() and target_url:
-        current_target_url = target_url
+    if 'current_target_url' in locals() and current_target_url:
+        current_target_url = current_target_url
     # Otherwise check if it's in session state
     elif "target_url" in st.session_state and st.session_state.target_url:
         current_target_url = st.session_state.target_url
@@ -1346,12 +1346,9 @@ def analyze_dns(domain: str, options: list[str]):
         "zone_transfer": "Not tested",
         "dnssec": "Not checked",
     }
-
     resolver = dns.resolver.Resolver()
     resolver.timeout = 3
     resolver.lifetime = 5
-
-    # Fetch standard records
     if "DNS Records" in options:
         for rtype in ["A", "AAAA", "MX", "TXT", "NS"]:
             try:
@@ -1360,10 +1357,7 @@ def analyze_dns(domain: str, options: list[str]):
                     res["dns_records"][rtype] = [str(rdata) for rdata in answers]
             except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.exception.DNSException):
                 pass
-
-    # SPF / DMARC checks
     if any(opt in options for opt in ["SPF/DMARC Check"]):
-        # SPF
         txt_records = res["dns_records"].get("TXT", [])
         spf_record = next((t for t in txt_records if t.lower().startswith("v=spf1")), None)
         if spf_record:
@@ -1374,8 +1368,6 @@ def analyze_dns(domain: str, options: list[str]):
             )
         else:
             res["spf_check"] = "FAIL - SPF record missing"
-
-        # DMARC
         try:
             dmarc_domain = f"_dmarc.{domain}"
             dmarc_ans = resolver.resolve(dmarc_domain, "TXT", raise_on_no_answer=False)
@@ -1390,16 +1382,12 @@ def analyze_dns(domain: str, options: list[str]):
                 res["dmarc_check"] = "FAIL - DMARC record missing"
         except dns.exception.DNSException:
             res["dmarc_check"] = "ERROR - Could not query DMARC"
-
-    # DNSSEC detection (simple): look for DS record at parent zone
     if "DNSEC Validation" in options:
         try:
             ds_ans = resolver.resolve(domain, "DS", raise_on_no_answer=False)
             res["dnssec"] = "ENABLED" if ds_ans else "NOT ENABLED"
         except dns.exception.DNSException:
             res["dnssec"] = "ERROR - Unable to determine DNSSEC status"
-
-    # Zone transfer test
     if "Zone Transfer Test" in options:
         ns_records = res["dns_records"].get("NS", [])
         protected = True
@@ -1407,13 +1395,11 @@ def analyze_dns(domain: str, options: list[str]):
             nshost = str(ns).rstrip('.')
             try:
                 zone = dns.zone.from_xfr(dns.query.xfr(nshost, domain, timeout=5))
-                # If we get here, zone transfer succeeded
                 protected = False
                 break
             except Exception:
                 continue
         res["zone_transfer"] = "PROTECTED - Zone transfer not allowed" if protected else "VULNERABLE - Zone transfer succeeded"
-
     return res
 
 # ---------------- SSL/TLS ANALYSIS UTIL -----------------
@@ -1426,8 +1412,6 @@ def analyze_ssl_tls(host: str, port: int = 443):
         "cipher_summary": "",
         "rating": "",
     }
-
-    # Helper to test protocol support
     def _supports(version: ssl.TLSVersion):
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.minimum_version = version
@@ -1442,8 +1426,6 @@ def analyze_ssl_tls(host: str, port: int = 443):
             return False
         except Exception:
             return False
-
-    # Certificate retrieval (TLS1.2 context)
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
@@ -1451,8 +1433,6 @@ def analyze_ssl_tls(host: str, port: int = 443):
         with ctx.wrap_socket(sock, server_hostname=host) as ssock:
             cert = ssock.getpeercert()
             cipher = ssock.cipher()
-
-    # Populate cert info
     result["cert"] = {
         "subject": ", ".join("=".join(t) for t in cert.get("subject", [[("")]])[0]),
         "issuer": ", ".join("=".join(t) for t in cert.get("issuer", [[("")]])[0]),
@@ -1462,8 +1442,6 @@ def analyze_ssl_tls(host: str, port: int = 443):
         "signature_algorithm": cert.get("signatureAlgorithm", "Unknown"),
         "key_size": f"{cert.get('subjectPublicKeyInfo', {}).get('RSA', {}).get('key_size', 'Unknown')} bits",
     }
-
-    # Protocols check
     for version_label, version in [
         ("TLS 1.3", ssl.TLSVersion.TLSv1_3),
         ("TLS 1.2", ssl.TLSVersion.TLSv1_2),
@@ -1471,20 +1449,15 @@ def analyze_ssl_tls(host: str, port: int = 443):
         ("TLS 1.0", ssl.TLSVersion.TLSv1),
     ]:
         result["protocols"][version_label] = _supports(version)
-
-    # Simple cipher assessment
     cipher_name, protocol, bits = cipher
     if bits and bits >= 128:
         result["cipher_summary"] = f"✅ Strong cipher negotiated: {cipher_name} ({bits} bits)"
     else:
         result["cipher_summary"] = f"⚠️ Weak cipher negotiated: {cipher_name} ({bits} bits)"
-
-    # Rating heuristics
     if result["protocols"].get("TLS 1.3") and not result["protocols"].get("TLS 1.0"):
         result["rating"] = "**A** - Modern protocols, strong cipher"
     else:
         result["rating"] = "**B** - Improve protocol/cipher configuration"
-
     return result
 
 # ---------------- NVD SEARCH UTIL -----------------
@@ -1493,18 +1466,15 @@ def search_nvd(keyword: str, max_results: int = 20):
     """Query NVD API v2 for keyword and return simplified CVE list."""
     import urllib.parse
     base = "https://services.nvd.nist.gov/rest/json/v2/cves/1.0"  # legacy path fallback
-    # New 2.0 endpoint
     base2 = "https://services.nvd.nist.gov/rest/json/cves/2.0"
     params = {
         "keywordSearch": keyword,
         "resultsPerPage": max_results,
     }
-
     url = f"{base2}?{urllib.parse.urlencode(params)}"
     r = requests.get(url, timeout=15)
     if r.status_code != 200:
         raise RuntimeError(f"NVD API error {r.status_code}")
-
     data = r.json()
     vulns = data.get("vulnerabilities", [])
     results = []
